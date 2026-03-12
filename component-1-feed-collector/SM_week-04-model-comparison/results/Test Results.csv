@@ -1,0 +1,12 @@
+﻿input_text,model_1_sentiment_label,model_1_sentiment_score,model_2_zeroshot_label,model_2_zeroshot_score,model_3_ner_entities,model_4_groq_classification,notes,tested_at
+Unauthorized login from IP 198.51.100.4 at 3:47 AM — multiple failed attempts,NEGATIVE,0.9992,possible anomaly,0.9,"{""label"":""unauthorized access"",""score"":0.9731817841529846}","HIGH. This alert is high severity because it indicates a potential brute-force attack on a login account, which could compromise network security if left unchecked.",,3/11/2026 10:34pm
+Routine firewall rule update completed on fw-01 during scheduled maintenance window,NEGATIVE,0.9981,routine activity,1.0,"{""label"":""routine maintenance"",""score"":0.9869543313980103}","INFORMATIONAL
+
+This alert is informational as it indicates that a scheduled maintenance window has been completed without any apparent issues or anomalies.",,3/11/2026 10:33pm
+Phishing email detected targeting finance@company.com — spoofed sender domain,NEGATIVE,0.9968,possible anomaly,0.8,"{""label"":""phishing"",""score"":0.9421426057815552}","MEDIUM
+
+This alert is classified as MEDIUM severity because the phishing attempt may result in potential financial or credential compromise, but the fact that it was detected suggests a controlled email gateway and lower chances of the attack succeeding undetected.",,3/11/2026 10:34pm
+"Multiple failed SSH authentication attempts from external IP — 47 attempts in 5
+minutes",NEGATIVE,0.9990,,,"{""error"":""JSON parameter needs to be valid JSON""}",,,3/11/2026 10:34pm
+"System resource utilization normal across all monitored hosts — no anomalies
+detected",NEGATIVE,0.9873,,,"{""error"":""JSON parameter needs to be valid JSON""}",,,3/11/2026 10:34pm
