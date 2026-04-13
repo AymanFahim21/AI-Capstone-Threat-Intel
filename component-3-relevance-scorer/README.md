@@ -4,8 +4,7 @@
 ## Description
 This component scores cybersecurity threats based on how relevant they are to the organization's technology stack. The workflow reads enriched threat summaries from Airtable, compares them against technologies listed in the Tech Stack table, sends the data to Groq for analysis, and writes back a relevance score, priority, and explanation.
 
-## Status
-## Tools
+## Status - Tools
 - n8n
 - Airtable
 - Groq API
