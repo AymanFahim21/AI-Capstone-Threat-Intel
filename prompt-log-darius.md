@@ -1,4 +1,4 @@
-# Prompt Log — Ren
+# Prompt Log — Darius
 
 **Project:** AI-Capstone-Threat-Intel  
 **Team:** Mathews, Darius, Ayman, Barry
