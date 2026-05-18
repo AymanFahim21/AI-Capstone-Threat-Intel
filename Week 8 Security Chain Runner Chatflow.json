@@ -1,0 +1,278 @@
+{
+  "nodes": [
+    {
+      "id": "groqChat_0",
+      "position": {
+        "x": 80,
+        "y": 180
+      },
+      "type": "customNode",
+      "data": {
+        "id": "groqChat_0",
+        "label": "GroqChat",
+        "version": 4,
+        "name": "groqChat",
+        "type": "GroqChat",
+        "baseClasses": [
+          "GroqChat",
+          "BaseChatModel",
+          "BaseLanguageModel",
+          "Runnable"
+        ],
+        "category": "Chat Models",
+        "description": "Wrapper around Groq API with LPU Inference Engine",
+        "inputParams": [
+          {
+            "label": "Connect Credential",
+            "name": "credential",
+            "type": "credential",
+            "credentialNames": [
+              "groqApi"
+            ],
+            "optional": true,
+            "id": "groqChat_0-input-credential-credential"
+          },
+          {
+            "label": "Model Name",
+            "name": "modelName",
+            "type": "asyncOptions",
+            "loadMethod": "listModels",
+            "placeholder": "llama3-70b-8192",
+            "id": "groqChat_0-input-modelName-asyncOptions"
+          },
+          {
+            "label": "Temperature",
+            "name": "temperature",
+            "type": "number",
+            "step": 0.1,
+            "default": 0.9,
+            "optional": true,
+            "id": "groqChat_0-input-temperature-number"
+          },
+          {
+            "label": "Streaming",
+            "name": "streaming",
+            "type": "boolean",
+            "default": true,
+            "optional": true,
+            "id": "groqChat_0-input-streaming-boolean"
+          }
+        ],
+        "inputAnchors": [
+          {
+            "label": "Cache",
+            "name": "cache",
+            "type": "BaseCache",
+            "optional": true,
+            "id": "groqChat_0-input-cache-BaseCache"
+          }
+        ],
+        "inputs": {
+          "cache": "",
+          "modelName": "llama-3.3-70b-versatile",
+          "temperature": 0.2,
+          "streaming": false
+        },
+        "outputAnchors": [
+          {
+            "id": "groqChat_0-output-groqChat-GroqChat|BaseChatModel|BaseLanguageModel|Runnable",
+            "name": "groqChat",
+            "label": "GroqChat",
+            "description": "Wrapper around Groq API with LPU Inference Engine",
+            "type": "GroqChat | BaseChatModel | BaseLanguageModel | Runnable"
+          }
+        ],
+        "outputs": {},
+        "selected": false
+      },
+      "width": 300,
+      "height": 624,
+      "selected": false,
+      "dragging": false,
+      "positionAbsolute": {
+        "x": 80,
+        "y": 180
+      }
+    },
+    {
+      "id": "promptTemplate_0",
+      "position": {
+        "x": 443.674294588876,
+        "y": 166.20457675332557
+      },
+      "type": "customNode",
+      "data": {
+        "id": "promptTemplate_0",
+        "label": "Prompt Template",
+        "version": 1,
+        "name": "promptTemplate",
+        "type": "PromptTemplate",
+        "baseClasses": [
+          "PromptTemplate",
+          "StringPromptTemplate",
+          "BasePromptTemplate",
+          "Runnable"
+        ],
+        "category": "Prompts",
+        "description": "Schema to represent a basic prompt for an LLM",
+        "inputParams": [
+          {
+            "label": "Template",
+            "name": "template",
+            "type": "string",
+            "rows": 4,
+            "placeholder": "What is a good name for a company that makes {product}?",
+            "id": "promptTemplate_0-input-template-string"
+          },
+          {
+            "label": "Format Prompt Values",
+            "name": "promptValues",
+            "type": "json",
+            "optional": true,
+            "acceptVariable": true,
+            "list": true,
+            "id": "promptTemplate_0-input-promptValues-json"
+          }
+        ],
+        "inputAnchors": [],
+        "inputs": {
+          "template": "You are the Week 8 Security Chain Runner for the AI-Capstone-Threat-Intel project. You perform one of three lab chain tasks depending on the TASK line in the user's input.\n\nThe user's message will include one of these exact task labels:\nTASK: CLASSIFY\nTASK: ANALYZE\nTASK: RECOMMEND\n\nGeneral rules for every task:\n- Return only one minified JSON object.\n- Do not use markdown.\n- Do not use code fences.\n- Do not include commentary before or after the JSON.\n- Do not invent fields outside the required schema for the selected task.\n- Use the provided input only; if something is unknown, use \"unknown\" instead of fabricating details.\n\nIf TASK is CLASSIFY:\nClassify the raw security alert by severity.\nReturn required keys: severity, confidence, reasoning.\nseverity must be exactly one of: CRITICAL, HIGH, MEDIUM, LOW, INFO.\nconfidence must be a number from 0.0 to 1.0.\nreasoning must be one concise sentence.\nSeverity definitions:\nCRITICAL means active exploitation, data exfiltration, command-and-control activity, credential compromise, confirmed malware execution, or system compromise in progress.\nHIGH means likely attack activity requiring immediate investigation, including brute force followed by success, privilege escalation, suspicious administrator activity, or high-confidence phishing.\nMEDIUM means suspicious activity that needs review within 24 hours.\nLOW means a minor anomaly that is likely benign but worth logging.\nINFO means normal activity recorded for audit purposes.\n\nIf TASK is ANALYZE:\nAnalyze the security alert and classification.\nReturn required keys: attack_type, indicators, potential_impact, related_mitre_techniques, confidence_assessment.\nattack_type must be a concise attack category, such as brute force, phishing, command and control, insider threat, malware, credential compromise, or misconfiguration.\nindicators must be an array of observed indicator strings.\npotential_impact must be one sentence describing the worst-case impact if unaddressed.\nrelated_mitre_techniques must be an array of MITRE ATT&CK technique IDs when reasonably identifiable; use [\"unknown\"] if not identifiable.\nconfidence_assessment must be exactly one of HIGH, MEDIUM, LOW.\n\nIf TASK is RECOMMEND:\nRecommend concrete response actions based on the threat analysis.\nReturn required keys: immediate_actions, investigation_steps, containment_strategy, escalation_needed, escalation_reason.\nimmediate_actions must be an ordered array of actions to take in the next 30 minutes.\ninvestigation_steps must be an ordered array of follow-up investigation tasks.\ncontainment_strategy must be one paragraph describing how to contain the threat.\nescalation_needed must be true or false.\nescalation_reason must explain why escalation is needed, or be \"N/A\" if escalation_needed is false.\nActions must be specific. Do not use vague instructions like \"investigate further\" unless followed by a concrete system, log source, entity, and time range.\n\nUser input:\n{question}",
+          "promptValues": ""
+        },
+        "outputAnchors": [
+          {
+            "id": "promptTemplate_0-output-promptTemplate-PromptTemplate|StringPromptTemplate|BasePromptTemplate|Runnable",
+            "name": "promptTemplate",
+            "label": "PromptTemplate",
+            "description": "Schema to represent a basic prompt for an LLM",
+            "type": "PromptTemplate | StringPromptTemplate | BasePromptTemplate | Runnable"
+          }
+        ],
+        "outputs": {},
+        "selected": false
+      },
+      "width": 300,
+      "height": 519,
+      "selected": false,
+      "dragging": false,
+      "positionAbsolute": {
+        "x": 443.674294588876,
+        "y": 166.20457675332557
+      }
+    },
+    {
+      "id": "llmChain_0",
+      "position": {
+        "x": 820,
+        "y": 150
+      },
+      "type": "customNode",
+      "data": {
+        "id": "llmChain_0",
+        "label": "LLM Chain",
+        "version": 3,
+        "name": "llmChain",
+        "type": "LLMChain",
+        "baseClasses": [
+          "LLMChain",
+          "BaseChain",
+          "Runnable"
+        ],
+        "category": "Chains",
+        "description": "Chain to run queries against LLMs",
+        "inputParams": [
+          {
+            "label": "Chain Name",
+            "name": "chainName",
+            "type": "string",
+            "placeholder": "Name Your Chain",
+            "optional": true,
+            "id": "llmChain_0-input-chainName-string"
+          }
+        ],
+        "inputAnchors": [
+          {
+            "label": "Language Model",
+            "name": "model",
+            "type": "BaseLanguageModel",
+            "id": "llmChain_0-input-model-BaseLanguageModel"
+          },
+          {
+            "label": "Prompt",
+            "name": "prompt",
+            "type": "BasePromptTemplate",
+            "id": "llmChain_0-input-prompt-BasePromptTemplate"
+          },
+          {
+            "label": "Output Parser",
+            "name": "outputParser",
+            "type": "BaseLLMOutputParser",
+            "optional": true,
+            "id": "llmChain_0-input-outputParser-BaseLLMOutputParser"
+          },
+          {
+            "label": "Input Moderation",
+            "description": "Detect text that could generate harmful output and prevent it from being sent to the language model",
+            "name": "inputModeration",
+            "type": "Moderation",
+            "optional": true,
+            "list": true,
+            "id": "llmChain_0-input-inputModeration-Moderation"
+          }
+        ],
+        "inputs": {
+          "model": "{{groqChat_0.data.instance}}",
+          "prompt": "{{promptTemplate_0.data.instance}}",
+          "outputParser": "",
+          "inputModeration": "",
+          "chainName": "Week 8 Security Chain Runner"
+        },
+        "outputAnchors": [
+          {
+            "id": "llmChain_0-output-llmChain-LLMChain|BaseChain|Runnable",
+            "name": "llmChain",
+            "label": "LLM Chain",
+            "description": "Chain to run queries against LLMs",
+            "type": "LLMChain | BaseChain | Runnable"
+          },
+          {
+            "id": "llmChain_0-output-outputPrediction-string|json",
+            "name": "outputPrediction",
+            "label": "Output Prediction",
+            "description": "Run prediction and return the generated output",
+            "type": "string | json"
+          }
+        ],
+        "outputs": {
+          "output": "llmChain"
+        },
+        "selected": false
+      },
+      "width": 300,
+      "height": 538,
+      "positionAbsolute": {
+        "x": 820,
+        "y": 150
+      },
+      "selected": false
+    }
+  ],
+  "edges": [
+    {
+      "source": "groqChat_0",
+      "sourceHandle": "groqChat_0-output-groqChat-GroqChat|BaseChatModel|BaseLanguageModel|Runnable",
+      "target": "llmChain_0",
+      "targetHandle": "llmChain_0-input-model-BaseLanguageModel",
+      "type": "buttonedge",
+      "id": "groqChat_0-groqChat_0-output-groqChat-GroqChat|BaseChatModel|BaseLanguageModel|Runnable-llmChain_0-llmChain_0-input-model-BaseLanguageModel"
+    },
+    {
+      "source": "promptTemplate_0",
+      "sourceHandle": "promptTemplate_0-output-promptTemplate-PromptTemplate|StringPromptTemplate|BasePromptTemplate|Runnable",
+      "target": "llmChain_0",
+      "targetHandle": "llmChain_0-input-prompt-BasePromptTemplate",
+      "type": "buttonedge",
+      "id": "promptTemplate_0-promptTemplate_0-output-promptTemplate-PromptTemplate|StringPromptTemplate|BasePromptTemplate|Runnable-llmChain_0-llmChain_0-input-prompt-BasePromptTemplate"
+    }
+  ]
+}

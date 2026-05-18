@@ -1,0 +1,208 @@
+{
+  "name": "Week 8 — LLM Chain Pipeline",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "8617b4dd-6bf4-45c4-ab7a-6f800a9d4bdb",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "818a32ad-810d-4e83-9bd3-5c088ba997ad",
+              "name": "alert_text",
+              "value": "Multiple failed SSH login attempts from 203.0.113.45 over 30 seconds, followed by a successful login and immediate privilege escalation to root",
+              "type": "string"
+            },
+            {
+              "id": "1b0466ac-1471-4e0c-bc13-8faed2dbb403",
+              "name": "security_chain_runner_url",
+              "value": "https://cloud.flowiseai.com/api/v1/prediction/e973db54-3b4b-43e3-a159-4323a4da4634",
+              "type": "string"
+            },
+            {
+              "id": "c34385eb-c28e-4d5b-97c0-2ef701ab454b",
+              "name": "flowise_api_key",
+              "value": "DJ5DpVcXzXgg3pP7EeVPzKTBHnhlYB69x_FvE6CQS1Q",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "26eb359b-ebb4-425a-b802-1bc5593d0f2d",
+      "name": "Edit Fields - Test Alert and Runner URL",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        176,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $node[\"Edit Fields - Test Alert and Runner URL\"].json[\"security_chain_runner_url\"] }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ \"Bearer \" + $node[\"Edit Fields - Test Alert and Runner URL\"].json[\"flowise_api_key\"] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "question",
+              "value": "={{ \"TASK: CLASSIFY\\nALERT: \" + $('Edit Fields - Test Alert and Runner URL').item.json.alert_text }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "03fe30bd-e9ff-429c-8f0e-20354b657cab",
+      "name": "HTTP Request - Runner as Chain 1 Classifier",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        432,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $node[\"Edit Fields - Test Alert and Runner URL\"].json[\"security_chain_runner_url\"] }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ \"Bearer \" + $node[\"Edit Fields - Test Alert and Runner URL\"].json[\"flowise_api_key\"] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "question",
+              "value": "={{ \"TASK: ANALYZE\\nORIGINAL ALERT: \" + $('Edit Fields - Test Alert and Runner URL').item.json.alert_text + \"\\nCLASSIFICATION JSON: \" + $json.text }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "db6c2b93-8290-4a01-bfeb-9d6eda8b6d89",
+      "name": "HTTP Request - Runner as Chain 2 Analyzer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $node[\"Edit Fields - Test Alert and Runner URL\"].json[\"security_chain_runner_url\"] }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ \"Bearer \" + $node[\"Edit Fields - Test Alert and Runner URL\"].json[\"flowise_api_key\"] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "question",
+              "value": "={{ \"TASK: RECOMMEND\\nTHREAT ANALYSIS JSON: \" + $json.text }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "2a85dbef-6238-4607-88fb-18b5753192c5",
+      "name": "HTTP Request - Runner as Chain 3 Recommender",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        992,
+        -144
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields - Test Alert and Runner URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Fields - Test Alert and Runner URL": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request - Runner as Chain 1 Classifier",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request - Runner as Chain 1 Classifier": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request - Runner as Chain 2 Analyzer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request - Runner as Chain 2 Analyzer": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request - Runner as Chain 3 Recommender",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "51e1c297-54a5-4d73-968f-03db1b7411d5",
+  "meta": {
+    "instanceId": "a69ec37954977b88a479ebfa185a30fc778ae1a13872bdbe9e26e7b8edafd875"
+  },
+  "id": "ElBxgI39sWUeSAPD",
+  "tags": []
+}
