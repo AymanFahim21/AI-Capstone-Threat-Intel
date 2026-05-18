@@ -1,8 +1,8 @@
 # Prompt Log — Ren
 
 **Project:** AI-Capstone-Threat-Intel  
-**Team:** Mathews, Darius, Ayman, Uyi, Barry, and Integration/Presentation members  
-**My Component:** Feed Collector / Ingestion  
+**Team:** Mathews, Darius, Ayman, Barry
+**My Component:** Feed Collector
 **AI Tools Used:** GitHub Copilot, ChatGPT
 
 ---
