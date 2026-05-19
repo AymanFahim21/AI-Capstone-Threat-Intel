@@ -1,0 +1,64 @@
+# Project Overview
+
+## Project Name
+Threat Intelligence Automation Pipeline
+
+## Team
+[Your Name]
+
+## Purpose
+This project uses LLM chains and RAG workflows to analyze cybersecurity alerts, classify threats, and recommend incident response actions.
+
+---
+
+# Architecture
+
+## Components
+- Flowise AI
+- n8n workflow automation
+- Groq LLM
+- HuggingFace Embeddings
+- In-Memory Vector Store
+
+## Workflow
+1. Alert classification
+2. Threat analysis
+3. Response recommendation
+4. Automated workflow chaining in n8n
+
+---
+
+# Coding Standards
+
+## Naming
+- Use descriptive variable names
+- Use lowercase_with_underscores for workflow fields
+
+## Security
+- Never hardcode API keys
+- Use environment variables where possible
+
+---
+
+# AI Assistant Behavior
+
+When generating code:
+- Prioritize readability
+- Include comments
+- Validate JSON formatting
+- Follow cybersecurity best practices
+
+---
+
+# Current Status
+
+## Completed
+- LLM classification chain
+- Threat analysis chain
+- Recommendation chain
+- RAG chatbot
+- n8n workflow integration
+
+## In Progress
+- Capstone audit
+- Documentation
