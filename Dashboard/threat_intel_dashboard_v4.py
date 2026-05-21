@@ -1,10 +1,10 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 from pyairtable import Api
-from datetime import datetime, timedelta
+from datetime import datetime
 import re
+import json
 import requests
 import smtplib
 from email.mime.text import MIMEText
@@ -28,65 +28,23 @@ SMTP_USER = get_secret("SMTP_USER")
 SMTP_PASS = get_secret("SMTP_PASS")
 ALERT_TO_EMAIL = get_secret("ALERT_TO_EMAIL")
 
-BASE_ID = "appvjtsGiE98O1MhU"
-TABLE_ID = "tblhkkgT7prpJdO4i"
+# Base + table IDs. Override in secrets.toml if they differ.
+BASE_ID = get_secret("BASE_ID", "appvjtsGiE98O1MhU")
+THREATS_TABLE_ID = get_secret("THREATS_TABLE_ID", "tblhkkgT7prpJdO4i")
+OTX_TABLE_ID = get_secret("OTX_TABLE_ID", "")  # set this to enable the AlienVault source
 
 SEVERITY_COLORS = {
     "Critical": "#dc2626", "High": "#ea580c", "Medium": "#ca8a04",
     "Low": "#16a34a", "Informational": "#3b82f6", "N/A": "#6b7280",
 }
-PRIORITY_COLORS = {
-    "Critical": "#dc2626", "High": "#ea580c", "Medium": "#ca8a04",
-    "Low": "#16a34a", "N/A": "#6b7280",
-}
 SEVERITY_ORDER = ["Critical", "High", "Medium", "Low", "Informational", "N/A"]
-PRIORITY_ORDER = ["Critical", "High", "Medium", "Low", "N/A"]
-
-# Normalize anything Airtable throws at us
 SEVERITY_MAPPING = {
     "Critical": "Critical", "High": "High", "Medium": "Medium", "Med": "Medium",
     "Low": "Low", "Informational": "Informational", "Info": "Informational",
-    "Unknown": "N/A", "None": "N/A", "N/A": "N/A", "Na": "N/A", "Nan": "N/A",
-}
-PRIORITY_MAPPING = {
-    "Critical": "Critical", "High": "High", "Medium": "Medium", "Med": "Medium",
-    "Low": "Low", "Unknown": "N/A", "None": "N/A", "N/A": "N/A", "Na": "N/A", "Nan": "N/A",
+    "Unknown": "N/A", "None": "N/A", "N/A": "N/A", "Na": "N/A", "Nan": "N/A", "": "N/A",
 }
 
 CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
-MITRE_PATTERN = re.compile(r"\bT\d{4}(?:\.\d{3})?\b")
-
-MITRE_TECHNIQUES = {
-    "T1003": "OS Credential Dumping", "T1005": "Data from Local System",
-    "T1021": "Remote Services", "T1027": "Obfuscated Files or Information",
-    "T1036": "Masquerading", "T1041": "Exfiltration Over C2 Channel",
-    "T1047": "Windows Management Instrumentation", "T1053": "Scheduled Task/Job",
-    "T1055": "Process Injection", "T1057": "Process Discovery",
-    "T1059": "Command and Scripting Interpreter", "T1068": "Exploitation for Privilege Escalation",
-    "T1071": "Application Layer Protocol", "T1078": "Valid Accounts",
-    "T1082": "System Information Discovery", "T1083": "File and Directory Discovery",
-    "T1090": "Proxy", "T1095": "Non-Application Layer Protocol",
-    "T1098": "Account Manipulation", "T1105": "Ingress Tool Transfer",
-    "T1110": "Brute Force", "T1112": "Modify Registry",
-    "T1133": "External Remote Services", "T1140": "Deobfuscate/Decode Files",
-    "T1190": "Exploit Public-Facing Application", "T1203": "Exploitation for Client Execution",
-    "T1204": "User Execution", "T1210": "Exploitation of Remote Services",
-    "T1218": "System Binary Proxy Execution", "T1219": "Remote Access Software",
-    "T1486": "Data Encrypted for Impact", "T1490": "Inhibit System Recovery",
-    "T1496": "Resource Hijacking", "T1497": "Virtualization/Sandbox Evasion",
-    "T1505": "Server Software Component", "T1518": "Software Discovery",
-    "T1543": "Create or Modify System Process", "T1547": "Boot or Logon Autostart Execution",
-    "T1548": "Abuse Elevation Control Mechanism", "T1552": "Unsecured Credentials",
-    "T1555": "Credentials from Password Stores", "T1556": "Modify Authentication Process",
-    "T1557": "Adversary-in-the-Middle", "T1562": "Impair Defenses",
-    "T1564": "Hide Artifacts", "T1566": "Phishing",
-    "T1567": "Exfiltration Over Web Service", "T1569": "System Services",
-    "T1570": "Lateral Tool Transfer", "T1571": "Non-Standard Port",
-    "T1572": "Protocol Tunneling", "T1573": "Encrypted Channel",
-    "T1574": "Hijack Execution Flow", "T1583": "Acquire Infrastructure",
-    "T1584": "Compromise Infrastructure", "T1588": "Obtain Capabilities",
-    "T1595": "Active Scanning", "T1608": "Stage Capabilities",
-}
 
 # ============================================================================
 # PAGE SETUP
@@ -101,34 +59,79 @@ if "alert_log" not in st.session_state:
 # NORMALIZATION HELPERS
 # ============================================================================
 def coerce_to_string(val):
-    """Airtable returns multi-selects as lists. Flatten everything to a single string."""
-    if pd.isna(val) if not isinstance(val, list) else False:
-        return ""
     if isinstance(val, list):
         return ", ".join(str(v) for v in val if v is not None) if val else ""
+    if pd.isna(val):
+        return ""
     return str(val).strip()
 
-def normalize_categorical(val, mapping):
-    """Handle list/string/NaN, title-case, then map variants to canonical form."""
+def normalize_severity(val):
     s = coerce_to_string(val)
     if not s or s.lower() == "nan":
         return "N/A"
-    # If it's a list joined with commas, take the first non-empty token
-    first = s.split(",")[0].strip()
-    if not first:
-        return "N/A"
-    normalized = first.title()
-    return mapping.get(normalized, normalized)
+    first = s.split(",")[0].strip().title()
+    return SEVERITY_MAPPING.get(first, first)
 
-def extract_cves(text):
-    if pd.isna(text):
-        return []
-    return sorted(set(m.upper() for m in CVE_PATTERN.findall(str(text))))
+def parse_cve_field(val):
+    """CVE IDs come as a clean comma-separated string in Airtable; also catch any in free text."""
+    s = coerce_to_string(val)
+    found = set(m.upper() for m in CVE_PATTERN.findall(s))
+    return sorted(found)
 
-def extract_mitre(text):
-    if pd.isna(text):
+def parse_list_field(val):
+    """IOC fields are stored as JSON arrays or comma strings. Return a clean list."""
+    s = coerce_to_string(val)
+    if not s:
         return []
-    return sorted(set(m.upper() for m in MITRE_PATTERN.findall(str(text))))
+    # Try JSON first
+    try:
+        parsed = json.loads(s)
+        if isinstance(parsed, list):
+            return [str(x).strip() for x in parsed if str(x).strip()]
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # Fall back to comma split
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+def split_multi(val):
+    """Attack Type / Affected Software are comma-separated multi-values."""
+    s = coerce_to_string(val)
+    if not s or s.lower() in ("nan", "unknown", "n/a", ""):
+        return []
+    return [x.strip() for x in s.split(",") if x.strip() and x.strip().lower() not in ("unknown", "n/a")]
+
+def parse_date(val):
+    return pd.to_datetime(coerce_to_string(val), errors="coerce")
+
+# ============================================================================
+# ALERTING
+# ============================================================================
+def send_slack_alert(message_text, blocks=None):
+    if not SLACK_WEBHOOK_URL:
+        return False, "Slack webhook not configured"
+    try:
+        payload = {"text": message_text}
+        if blocks:
+            payload["blocks"] = blocks
+        r = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=10)
+        return (r.status_code == 200, "Sent" if r.status_code == 200 else f"HTTP {r.status_code}")
+    except Exception as e:
+        return False, str(e)
+
+def send_email_alert(subject, html_body):
+    if not all([SMTP_HOST, SMTP_USER, SMTP_PASS, ALERT_TO_EMAIL]):
+        return False, "SMTP credentials not configured"
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["From"], msg["To"], msg["Subject"] = SMTP_USER, ALERT_TO_EMAIL, subject
+        msg.attach(MIMEText(html_body, "html"))
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+        return True, "Sent"
+    except Exception as e:
+        return False, str(e)
 
 # ============================================================================
 # NVD ENRICHMENT
@@ -141,207 +144,153 @@ def fetch_nvd_cve(cve_id):
         r = requests.get(url, headers=headers, timeout=10)
         if r.status_code != 200:
             return None
-        data = r.json()
-        vulns = data.get("vulnerabilities", [])
+        vulns = r.json().get("vulnerabilities", [])
         if not vulns:
             return None
         vuln = vulns[0]["cve"]
-        cvss_score = severity = vector = None
+        cvss = sev = vector = None
         metrics = vuln.get("metrics", {})
         for key in ("cvssMetricV31", "cvssMetricV30"):
-            if key in metrics and metrics[key]:
+            if metrics.get(key):
                 m = metrics[key][0]["cvssData"]
-                cvss_score = m.get("baseScore")
-                severity = m.get("baseSeverity")
-                vector = m.get("vectorString")
+                cvss, sev, vector = m.get("baseScore"), m.get("baseSeverity"), m.get("vectorString")
                 break
-        if cvss_score is None and "cvssMetricV2" in metrics and metrics["cvssMetricV2"]:
+        if cvss is None and metrics.get("cvssMetricV2"):
             m = metrics["cvssMetricV2"][0]
-            cvss_score = m["cvssData"].get("baseScore")
-            severity = m.get("baseSeverity")
-            vector = m["cvssData"].get("vectorString")
+            cvss, sev, vector = m["cvssData"].get("baseScore"), m.get("baseSeverity"), m["cvssData"].get("vectorString")
         descs = vuln.get("descriptions", [])
-        description = next((d["value"] for d in descs if d.get("lang") == "en"), "")
-        return {
-            "cve_id": cve_id, "cvss_score": cvss_score, "severity": severity,
-            "vector": vector, "description": description[:400],
-            "published": vuln.get("published"),
-            "link": f"https://nvd.nist.gov/vuln/detail/{cve_id}",
-        }
+        desc = next((d["value"] for d in descs if d.get("lang") == "en"), "")
+        return {"cvss_score": cvss, "severity": sev, "vector": vector,
+                "description": desc[:400], "published": vuln.get("published"),
+                "link": f"https://nvd.nist.gov/vuln/detail/{cve_id}"}
     except Exception:
         return None
 
 # ============================================================================
-# ALERTING
+# DATA LOADING — maps the REAL Airtable schema into a common shape
 # ============================================================================
-def send_slack_alert(message_text, blocks=None):
-    if not SLACK_WEBHOOK_URL:
-        return False, "Slack webhook not configured"
-    try:
-        payload = {"text": message_text}
-        if blocks: payload["blocks"] = blocks
-        r = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=10)
-        return (r.status_code == 200, "Sent" if r.status_code == 200 else f"HTTP {r.status_code}")
-    except Exception as e:
-        return False, str(e)
+def standardize(records, source_label):
+    """Map a table's records to a normalized dataframe regardless of source schema."""
+    rows = []
+    for r in records:
+        f = r.get("fields", {})
 
-def send_email_alert(subject, html_body):
-    if not all([SMTP_HOST, SMTP_USER, SMTP_PASS, ALERT_TO_EMAIL]):
-        return False, "SMTP credentials not configured"
-    try:
-        msg = MIMEMultipart("alternative")
-        msg["From"] = SMTP_USER
-        msg["To"] = ALERT_TO_EMAIL
-        msg["Subject"] = subject
-        msg.attach(MIMEText(html_body, "html"))
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.send_message(msg)
-        return True, "Sent"
-    except Exception as e:
-        return False, str(e)
+        # Title: "Title" (Threats) or "title" (OTX)
+        title = f.get("Title") or f.get("title") or "Untitled"
+        # Summary: "Summary" / "AI Summary"
+        summary = f.get("Summary") or f.get("AI Summary") or f.get("description") or ""
+        # Source: "Source" (Threats) or "source" (OTX)
+        src = f.get("Source") or f.get("source") or source_label
+        # Date: prefer published/created
+        date = (f.get("Published Date") or f.get("created")
+                or f.get("Collected Date") or r.get("createdTime"))
 
-def build_slack_blocks_for_threat(threat):
-    combined = str(threat.get("Title", "")) + " " + str(threat.get("Summary", ""))
-    cves = extract_cves(combined)
-    return [
-        {"type": "header", "text": {"type": "plain_text", "text": f"🚨 {threat.get('Priority Ranking', 'Unknown')} Threat"}},
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{threat.get('Title', 'Untitled')}*"}},
-        {"type": "section", "fields": [
-            {"type": "mrkdwn", "text": f"*Severity:* {threat.get('Severity Level', 'N/A')}"},
-            {"type": "mrkdwn", "text": f"*Score:* {float(threat.get('Relevance Score', 0)):.0f}/100"},
-            {"type": "mrkdwn", "text": f"*Affected:* {str(threat.get('Affected Software', 'Unknown'))[:80]}"},
-            {"type": "mrkdwn", "text": f"*CVEs:* {', '.join(cves[:3]) if cves else 'None detected'}"},
-        ]},
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"_{str(threat.get('Summary', ''))[:500]}_"}},
-    ]
+        rows.append({
+            "Title": coerce_to_string(title) or "Untitled",
+            "Summary": coerce_to_string(summary),
+            "Source": coerce_to_string(src) or source_label,
+            "Source Table": source_label,
+            "Severity Level": normalize_severity(f.get("Severity Level")),
+            "Relevance Score": pd.to_numeric(f.get("Relevance Score"), errors="coerce"),
+            "Attack Types": split_multi(f.get("Attack Type")),
+            "Affected Software": split_multi(f.get("Affected Software")),
+            "CVEs": parse_cve_field(f.get("CVE IDs")) or parse_cve_field(
+                f"{coerce_to_string(title)} {coerce_to_string(summary)}"),
+            "Category": coerce_to_string(f.get("Category")) or coerce_to_string(f.get("Source Type")),
+            "URL": coerce_to_string(f.get("URL")) or coerce_to_string(f.get("references")),
+            "Recommended Actions": coerce_to_string(f.get("Recommended Actions") or f.get("Recommended Action")),
+            "Tags": split_multi(f.get("Tags") or f.get("tags")),
+            "IOC IPs": parse_list_field(f.get("IOC IPs")),
+            "IOC Domains": parse_list_field(f.get("IOC Domains")),
+            "IOC URLs": parse_list_field(f.get("IOC URLs")),
+            "IOC Hashes": parse_list_field(f.get("IOC Hashes")),
+            "_date": parse_date(date),
+        })
+    return pd.DataFrame(rows)
 
-def build_email_html_for_threats(threats_df):
-    rows = ""
-    for _, t in threats_df.iterrows():
-        sev_color = SEVERITY_COLORS.get(t.get("Severity Level", "N/A"), "#6b7280")
-        cves = extract_cves(str(t.get("Title", "")) + " " + str(t.get("Summary", "")))
-        rows += f"""
-        <tr>
-          <td style="padding:8px;border:1px solid #ddd;"><strong>{t.get('Title', 'Untitled')}</strong></td>
-          <td style="padding:8px;border:1px solid #ddd;background:{sev_color};color:white;text-align:center;">{t.get('Severity Level', 'N/A')}</td>
-          <td style="padding:8px;border:1px solid #ddd;text-align:center;">{float(t.get('Relevance Score', 0)):.0f}</td>
-          <td style="padding:8px;border:1px solid #ddd;">{', '.join(cves[:3]) if cves else '—'}</td>
-        </tr>"""
-    return f"""<html><body style="font-family:Arial,sans-serif;">
-      <h2 style="color:#dc2626;">🚨 Threat Intel Alert — {len(threats_df)} Threats</h2>
-      <p>Generated at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-      <table style="border-collapse:collapse;width:100%;">
-        <tr style="background:#1f2937;color:white;">
-          <th style="padding:8px;border:1px solid #ddd;text-align:left;">Title</th>
-          <th style="padding:8px;border:1px solid #ddd;">Severity</th>
-          <th style="padding:8px;border:1px solid #ddd;">Score</th>
-          <th style="padding:8px;border:1px solid #ddd;">CVEs</th>
-        </tr>{rows}</table>
-      <p style="color:#666;font-size:12px;margin-top:20px;">Sent from Threat Intel Dashboard</p>
-    </body></html>"""
-
-# ============================================================================
-# DATA LOADING
-# ============================================================================
 @st.cache_data(ttl=60)
-def load_data():
+def load_source(table_id, label):
     if not AIRTABLE_PAT:
-        st.error("AIRTABLE_PAT not found in .streamlit/secrets.toml")
-        return pd.DataFrame()
+        return pd.DataFrame(), "AIRTABLE_PAT not set in secrets"
+    if not table_id:
+        return pd.DataFrame(), "table id not configured"
     try:
         api = Api(AIRTABLE_PAT)
-        table = api.table(BASE_ID, TABLE_ID)
-        records = table.all()
-        data = []
-        for r in records:
-            fields = r.get("fields", {})
-            fields["_createdTime"] = r.get("createdTime", None)
-            data.append(fields)
-        df = pd.DataFrame(data)
-        expected_cols = ["Title", "Relevance Score", "Priority Ranking",
-                         "Severity Level", "Affected Software", "Summary"]
-        for col in expected_cols:
-            if col not in df.columns:
-                df[col] = None
-
-        # Normalize string fields (handle lists from multi-select, fill NaN)
-        df["Title"] = df["Title"].apply(coerce_to_string).replace("", "Untitled")
-        df["Summary"] = df["Summary"].apply(coerce_to_string)
-        df["Affected Software"] = df["Affected Software"].apply(coerce_to_string).replace("", "Unknown")
-
-        # Normalize categorical fields (case-insensitive, mapping variants)
-        df["Severity Level"] = df["Severity Level"].apply(lambda v: normalize_categorical(v, SEVERITY_MAPPING))
-        df["Priority Ranking"] = df["Priority Ranking"].apply(lambda v: normalize_categorical(v, PRIORITY_MAPPING))
-
-        # Numeric
-        df["Relevance Score"] = pd.to_numeric(df["Relevance Score"], errors="coerce").fillna(0)
-
-        # Timestamp
-        if "_createdTime" in df.columns:
-            df["_createdTime"] = pd.to_datetime(df["_createdTime"], errors="coerce", utc=True)
-
-        # Pre-extract CVEs and MITRE
-        combined = df["Title"].astype(str) + " " + df["Summary"].astype(str)
-        df["_cves"] = combined.apply(extract_cves)
-        df["_mitre"] = combined.apply(extract_mitre)
-
-        # If Priority Ranking is mostly empty, fall back to Severity Level for triage
-        priority_empty_pct = (df["Priority Ranking"] == "N/A").mean()
-        df["_priority_effective"] = df["Priority Ranking"]
-        df["_priority_fallback_used"] = False
-        if priority_empty_pct > 0.8:
-            df["_priority_effective"] = df.apply(
-                lambda row: row["Severity Level"] if row["Priority Ranking"] == "N/A" else row["Priority Ranking"],
-                axis=1
-            )
-            df["_priority_fallback_used"] = True
-
-        return df
+        records = api.table(BASE_ID, table_id).all()
+        return standardize(records, label), None
     except Exception as e:
-        st.error(f"Failed to connect to Airtable. Check your PAT. Error: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), str(e)
 
 # ============================================================================
-# HEADER
+# SOURCE SELECTOR
 # ============================================================================
-col_refresh, col_time = st.columns([1, 5])
+col_src, col_refresh, col_time = st.columns([2, 1, 3])
+with col_src:
+    source_options = ["Threats (Krebs/RSS)"]
+    if OTX_TABLE_ID:
+        source_options += ["AlienVault OTX", "Combined (both)"]
+    source_choice = st.selectbox("Data source", source_options)
 with col_refresh:
-    if st.button("🔄 Refresh Data"):
+    if st.button("🔄 Refresh"):
         st.cache_data.clear()
         st.rerun()
-df = load_data()
 with col_time:
     st.caption(f"Last loaded: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
+errors = []
+frames = []
+if source_choice in ("Threats (Krebs/RSS)", "Combined (both)"):
+    d, err = load_source(THREATS_TABLE_ID, "Threats")
+    if err: errors.append(f"Threats: {err}")
+    else: frames.append(d)
+if source_choice in ("AlienVault OTX", "Combined (both)") and OTX_TABLE_ID:
+    d, err = load_source(OTX_TABLE_ID, "AlienVault OTX")
+    if err: errors.append(f"OTX: {err}")
+    else: frames.append(d)
+
+if not OTX_TABLE_ID:
+    st.info("💡 To add the AlienVault OTX source, set `OTX_TABLE_ID` in your secrets "
+            "(find it in the Airtable URL, starts with `tbl`).")
+
+for e in errors:
+    st.error(f"Failed to load — {e}")
+
+df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 if df.empty:
-    st.warning("No data found. Make sure your Airtable table has records!")
+    st.warning("No data loaded. Check your PAT, base ID, and table IDs.")
     st.stop()
 
-# Pipeline-quality banner
-if df["_priority_fallback_used"].any():
-    st.warning(
-        "⚠️ **Priority Ranking is mostly empty in Airtable.** "
-        "Falling back to **Severity Level** for priority-based views. "
-        "Fix this upstream in your n8n workflow so the AI step populates 'Priority Ranking' for every record."
-    )
+# ============================================================================
+# DATA QUALITY CHECK
+# ============================================================================
+score_all_zero = (df["Relevance Score"].fillna(0) == 0).all()
+sev_all_same = df["Severity Level"].nunique() == 1
 
-# Data quality expander
+if score_all_zero:
+    st.warning("⚠️ **Relevance Score is 0 (or empty) for every record.** This field isn't being "
+               "populated by your n8n AI step yet. Score-based charts and the average will read 0 "
+               "until that's fixed upstream.")
+if sev_all_same:
+    only = df["Severity Level"].iloc[0]
+    st.warning(f"⚠️ **Every record has Severity Level = '{only}'.** Your n8n workflow is assigning the "
+               f"same severity to all threats. The dashboard is showing this faithfully — the fix is "
+               f"in the AI grading step, not here.")
+
 with st.expander("🔎 Data Quality Check"):
-    qc_cols = st.columns(4)
-    qc_cols[0].metric("Total Records", len(df))
-    qc_cols[1].metric("Severity Filled", f"{(df['Severity Level'] != 'N/A').sum()}/{len(df)}")
-    qc_cols[2].metric("Priority Filled", f"{(df['Priority Ranking'] != 'N/A').sum()}/{len(df)}")
-    qc_cols[3].metric("With CVEs", df["_cves"].apply(bool).sum())
-
-    qc_left, qc_right = st.columns(2)
-    with qc_left:
-        st.markdown("**Severity values in data:**")
+    q = st.columns(5)
+    q[0].metric("Total Records", len(df))
+    q[1].metric("Severity Filled", f"{(df['Severity Level'] != 'N/A').sum()}/{len(df)}")
+    q[2].metric("Score > 0", int((df['Relevance Score'].fillna(0) > 0).sum()))
+    q[3].metric("With CVEs", df["CVEs"].apply(bool).sum())
+    q[4].metric("With IOCs", df.apply(lambda r: bool(r["IOC IPs"] or r["IOC Domains"]
+                                                      or r["IOC URLs"] or r["IOC Hashes"]), axis=1).sum())
+    qc1, qc2 = st.columns(2)
+    with qc1:
+        st.markdown("**Severity values:**")
         st.write(df["Severity Level"].value_counts().to_dict())
-    with qc_right:
-        st.markdown("**Priority values in data:**")
-        st.write(df["Priority Ranking"].value_counts().to_dict())
+    with qc2:
+        st.markdown("**By source table:**")
+        st.write(df["Source Table"].value_counts().to_dict())
 
 # ============================================================================
 # SIDEBAR FILTERS
@@ -349,63 +298,64 @@ with st.expander("🔎 Data Quality Check"):
 st.sidebar.header("🔍 Filter Threats")
 search_term = st.sidebar.text_input("Search title or summary", "")
 
-priorities = [p for p in PRIORITY_ORDER if p in df["_priority_effective"].unique()]
-selected_priority = st.sidebar.multiselect("Priority", priorities, default=priorities)
-
 severities = [s for s in SEVERITY_ORDER if s in df["Severity Level"].unique()]
 selected_severity = st.sidebar.multiselect("Severity Level", severities, default=severities)
 
-min_s, max_s = int(df["Relevance Score"].min()), int(df["Relevance Score"].max())
-if max_s == min_s:
-    max_s = min_s + 1
-score_range = st.sidebar.slider("Relevance Score Range", min_s, max_s, (min_s, max_s))
+sources = sorted(df["Source"].dropna().unique().tolist())
+selected_sources = st.sidebar.multiselect("Source", sources, default=sources)
 
-filtered_df = df[
-    df["_priority_effective"].isin(selected_priority)
-    & df["Severity Level"].isin(selected_severity)
-    & df["Relevance Score"].between(score_range[0], score_range[1])
-]
+# Attack type filter (flattened)
+all_attack_types = sorted({a for lst in df["Attack Types"] for a in lst})
+selected_attacks = st.sidebar.multiselect("Attack Type (any of)", all_attack_types, default=[])
+
+valid_scores = df["Relevance Score"].dropna()
+if len(valid_scores) and valid_scores.max() > valid_scores.min():
+    min_s, max_s = int(valid_scores.min()), int(max(valid_scores.max(), 1))
+    score_range = st.sidebar.slider("Relevance Score Range", min_s, max_s, (min_s, max_s))
+else:
+    score_range = None
+    st.sidebar.caption("Relevance Score filter hidden (all scores are 0).")
+
+# Apply filters
+filtered_df = df[df["Severity Level"].isin(selected_severity) & df["Source"].isin(selected_sources)]
+if selected_attacks:
+    filtered_df = filtered_df[filtered_df["Attack Types"].apply(
+        lambda lst: any(a in lst for a in selected_attacks))]
+if score_range:
+    filtered_df = filtered_df[filtered_df["Relevance Score"].fillna(0).between(score_range[0], score_range[1])]
 if search_term:
-    mask = (
-        filtered_df["Title"].astype(str).str.contains(search_term, case=False, na=False)
-        | filtered_df["Summary"].astype(str).str.contains(search_term, case=False, na=False)
-    )
+    mask = (filtered_df["Title"].str.contains(search_term, case=False, na=False)
+            | filtered_df["Summary"].str.contains(search_term, case=False, na=False))
     filtered_df = filtered_df[mask]
-filtered_df = filtered_df.sort_values(by="Relevance Score", ascending=False)
+
+filtered_df = filtered_df.sort_values(by="Relevance Score", ascending=False, na_position="last")
 
 # ============================================================================
 # TOP METRICS
 # ============================================================================
 st.markdown("### Executive Summary")
-m1, m2, m3, m4, m5, m6 = st.columns(6)
-
+m = st.columns(6)
 total = len(filtered_df)
-critical = len(filtered_df[filtered_df["_priority_effective"] == "Critical"])
-high = len(filtered_df[filtered_df["_priority_effective"] == "High"])
-avg_score = filtered_df["Relevance Score"].mean() if total > 0 else 0
-unique_cves = len({c for cs in filtered_df["_cves"] for c in cs})
-
-new_24h = 0
-if filtered_df["_createdTime"].notna().any():
-    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=1)
-    new_24h = int((filtered_df["_createdTime"] > cutoff).sum())
-
-m1.metric("Total Threats", total)
-m2.metric("🔴 Critical", critical)
-m3.metric("🟠 High", high)
-m4.metric("Avg Score", f"{avg_score:.1f}/100")
-m5.metric("🆕 New (24h)", new_24h)
-m6.metric("Unique CVEs", unique_cves)
+crit = int((filtered_df["Severity Level"] == "Critical").sum())
+high = int((filtered_df["Severity Level"] == "High").sum())
+avg_score = filtered_df["Relevance Score"].dropna().mean() if total else 0
+unique_cves = len({c for cs in filtered_df["CVEs"] for c in cs})
+total_iocs = int(filtered_df.apply(lambda r: len(r["IOC IPs"]) + len(r["IOC Domains"])
+                                   + len(r["IOC URLs"]) + len(r["IOC Hashes"]), axis=1).sum())
+m[0].metric("Total Threats", total)
+m[1].metric("🔴 Critical", crit)
+m[2].metric("🟠 High", high)
+m[3].metric("Avg Score", f"{(avg_score or 0):.1f}/100")
+m[4].metric("Unique CVEs", unique_cves)
+m[5].metric("Total IOCs", total_iocs)
 
 st.divider()
 
 # ============================================================================
 # TABS
 # ============================================================================
-tab_analytics, tab_trends, tab_mitre, tab_table, tab_dive, tab_alerts, tab_export = st.tabs(
-    ["📊 Analytics", "📈 Trends", "⚔️ MITRE ATT&CK", "📋 Threat Table",
-     "🔬 Deep Dive", "🔔 Alerts", "💾 Export"]
-)
+tab_analytics, tab_iocs, tab_table, tab_dive, tab_alerts, tab_export = st.tabs(
+    ["📊 Analytics", "🎯 IOCs", "📋 Threat Table", "🔬 Deep Dive", "🔔 Alerts", "💾 Export"])
 
 # ----- ANALYTICS -----
 with tab_analytics:
@@ -415,322 +365,218 @@ with tab_analytics:
     else:
         c1, c2 = st.columns(2)
         with c1:
-            sev_counts = filtered_df["Severity Level"].value_counts().reset_index()
-            sev_counts.columns = ["Severity", "Count"]
-            sev_counts["Severity"] = pd.Categorical(sev_counts["Severity"], categories=SEVERITY_ORDER, ordered=True)
-            sev_counts = sev_counts.sort_values("Severity")
-            fig_sev = px.pie(sev_counts, values="Count", names="Severity",
-                             title="Severity Distribution", hole=0.5,
-                             color="Severity", color_discrete_map=SEVERITY_COLORS,
-                             category_orders={"Severity": SEVERITY_ORDER})
-            fig_sev.update_traces(textposition="inside", textinfo="percent+label")
-            st.plotly_chart(fig_sev, use_container_width=True)
-
+            sev = filtered_df["Severity Level"].value_counts().reset_index()
+            sev.columns = ["Severity", "Count"]
+            fig = px.pie(sev, values="Count", names="Severity", hole=0.5,
+                         title="Severity Distribution", color="Severity",
+                         color_discrete_map=SEVERITY_COLORS,
+                         category_orders={"Severity": SEVERITY_ORDER})
+            fig.update_traces(textposition="inside", textinfo="percent+label")
+            st.plotly_chart(fig, use_container_width=True)
         with c2:
-            pri_title = "Priority Distribution"
-            if df["_priority_fallback_used"].any():
-                pri_title += " (using Severity as fallback)"
-            pri_counts = filtered_df["_priority_effective"].value_counts().reset_index()
-            pri_counts.columns = ["Priority", "Count"]
-            pri_counts["Priority"] = pd.Categorical(pri_counts["Priority"], categories=PRIORITY_ORDER, ordered=True)
-            pri_counts = pri_counts.sort_values("Priority")
-            fig_pri = px.bar(pri_counts, x="Priority", y="Count", title=pri_title,
-                             color="Priority", color_discrete_map=PRIORITY_COLORS, text="Count",
-                             category_orders={"Priority": PRIORITY_ORDER})
-            fig_pri.update_traces(textposition="outside")
-            fig_pri.update_layout(showlegend=False)
-            st.plotly_chart(fig_pri, use_container_width=True)
+            # Attack Type frequency (real field, was unused before)
+            atk = [a for lst in filtered_df["Attack Types"] for a in lst]
+            if atk:
+                ac = pd.Series(atk).value_counts().reset_index()
+                ac.columns = ["Attack Type", "Count"]
+                fig = px.bar(ac, x="Count", y="Attack Type", orientation="h",
+                             title="Attack Types", color="Count", color_continuous_scale="Reds")
+                fig.update_layout(yaxis={"categoryorder": "total ascending"}, showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No Attack Type data.")
 
         c3, c4 = st.columns(2)
         with c3:
-            fig_hist = px.histogram(filtered_df, x="Relevance Score", nbins=20,
-                                    title="Relevance Score Distribution",
-                                    color_discrete_sequence=["#3b82f6"])
-            fig_hist.update_layout(bargap=0.1)
-            st.plotly_chart(fig_hist, use_container_width=True)
-
+            # Source breakdown
+            sc = filtered_df["Source"].value_counts().reset_index()
+            sc.columns = ["Source", "Count"]
+            fig = px.bar(sc, x="Source", y="Count", title="Threats by Source",
+                         color="Count", color_continuous_scale="Blues", text="Count")
+            fig.update_traces(textposition="outside")
+            fig.update_layout(showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
         with c4:
-            software_list = []
-            for s in filtered_df["Affected Software"].astype(str):
-                for item in s.split(","):
-                    item = item.strip()
-                    if item and item.lower() not in ("unknown", "n/a", "nan", ""):
-                        software_list.append(item)
-            if software_list:
-                sw_counts = pd.Series(software_list).value_counts().head(10).reset_index()
-                sw_counts.columns = ["Software", "Mentions"]
-                fig_sw = px.bar(sw_counts, x="Mentions", y="Software", orientation="h",
-                                title="Top 10 Affected Software",
-                                color="Mentions", color_continuous_scale="Reds")
-                fig_sw.update_layout(yaxis={"categoryorder": "total ascending"})
-                st.plotly_chart(fig_sw, use_container_width=True)
+            sw = [s for lst in filtered_df["Affected Software"] for s in lst]
+            if sw:
+                wc = pd.Series(sw).value_counts().head(10).reset_index()
+                wc.columns = ["Software", "Mentions"]
+                fig = px.bar(wc, x="Mentions", y="Software", orientation="h",
+                             title="Top 10 Affected Software", color="Mentions",
+                             color_continuous_scale="Oranges")
+                fig.update_layout(yaxis={"categoryorder": "total ascending"}, showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
             else:
-                st.info("No affected software data available.")
+                st.info("No Affected Software data.")
 
-        st.markdown("#### Priority × Severity Heatmap")
-        heat = filtered_df.groupby(["_priority_effective", "Severity Level"]).size().reset_index(name="Count")
-        if not heat.empty:
-            pivot = heat.pivot(index="_priority_effective", columns="Severity Level", values="Count").fillna(0)
-            pivot = pivot.reindex([p for p in PRIORITY_ORDER if p in pivot.index])
-            pivot = pivot[[s for s in SEVERITY_ORDER if s in pivot.columns]]
-            fig_heat = px.imshow(pivot,
-                                 labels=dict(x="Severity Level", y="Priority", color="Count"),
-                                 color_continuous_scale="Reds", text_auto=True, aspect="auto")
-            st.plotly_chart(fig_heat, use_container_width=True)
-
-        st.markdown("#### AI Relevance Score vs NVD CVSS Score")
-        st.caption("Validates how well the AI's relevance scoring aligns with the authoritative CVSS rating.")
-        if st.button("🔍 Run CVE enrichment on filtered threats"):
-            comparison_rows = []
-            cve_threats = filtered_df[filtered_df["_cves"].apply(len) > 0]
-            if cve_threats.empty:
-                st.info("No CVEs detected in the filtered threats.")
-            else:
-                progress = st.progress(0.0, text="Querying NVD...")
-                total_t = len(cve_threats)
-                for i, (_, row) in enumerate(cve_threats.iterrows()):
-                    for cve in row["_cves"][:3]:
-                        info = fetch_nvd_cve(cve)
-                        if info and info.get("cvss_score") is not None:
-                            comparison_rows.append({
-                                "Title": row["Title"][:50], "CVE": cve,
-                                "AI Relevance Score": row["Relevance Score"],
-                                "CVSS Score": info["cvss_score"] * 10,
-                                "CVSS Severity": info["severity"],
-                            })
-                    progress.progress((i + 1) / total_t, text=f"Querying NVD... {i+1}/{total_t}")
-                progress.empty()
-                if comparison_rows:
-                    comp_df = pd.DataFrame(comparison_rows)
-                    fig_scatter = px.scatter(
-                        comp_df, x="AI Relevance Score", y="CVSS Score",
-                        color="CVSS Severity", hover_data=["Title", "CVE"],
-                        title=f"AI vs CVSS — {len(comp_df)} CVE Matches",
-                        color_discrete_map={"CRITICAL": "#dc2626", "HIGH": "#ea580c",
-                                            "MEDIUM": "#ca8a04", "LOW": "#16a34a"})
-                    fig_scatter.add_shape(type="line", x0=0, y0=0, x1=100, y1=100,
-                                          line=dict(color="gray", dash="dash"))
-                    fig_scatter.update_layout(xaxis_range=[0, 100], yaxis_range=[0, 100])
-                    st.plotly_chart(fig_scatter, use_container_width=True)
-                    st.dataframe(comp_df, use_container_width=True, hide_index=True)
-                else:
-                    st.warning("No CVSS data returned from NVD.")
-
-# ----- TRENDS -----
-with tab_trends:
-    st.markdown("### Threat Trends Over Time")
-    if filtered_df["_createdTime"].notna().sum() < 2:
-        st.info("Not enough timestamp data to chart trends.")
-    else:
-        days = st.selectbox("Time window", [7, 14, 30, 60, 90], index=2)
-        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=days)
-        trend_df = filtered_df[filtered_df["_createdTime"] >= cutoff].copy()
-        trend_df["Date"] = trend_df["_createdTime"].dt.tz_convert(None).dt.date
-
-        if trend_df.empty:
-            st.info(f"No threats in the last {days} days.")
+        # Score histogram only if scores are meaningful
+        if (filtered_df["Relevance Score"].fillna(0) > 0).any():
+            fig = px.histogram(filtered_df, x="Relevance Score", nbins=20,
+                               title="Relevance Score Distribution",
+                               color_discrete_sequence=["#3b82f6"])
+            fig.update_layout(bargap=0.1)
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            daily = trend_df.groupby(["Date", "Severity Level"]).size().reset_index(name="Count")
-            fig_daily = px.bar(daily, x="Date", y="Count", color="Severity Level",
-                               color_discrete_map=SEVERITY_COLORS,
-                               category_orders={"Severity Level": SEVERITY_ORDER},
-                               title=f"Threats per Day (Last {days} Days)")
-            fig_daily.update_layout(barmode="stack")
-            st.plotly_chart(fig_daily, use_container_width=True)
+            st.caption("📉 Relevance Score histogram hidden — all scores are currently 0.")
 
-            c1, c2 = st.columns(2)
-            with c1:
-                cum = trend_df.sort_values("_createdTime").reset_index(drop=True)
-                cum["Running Total"] = range(1, len(cum) + 1)
-                fig_cum = px.line(cum, x="_createdTime", y="Running Total",
-                                  title="Cumulative Threat Count", markers=True)
-                fig_cum.update_traces(line_color="#3b82f6")
-                st.plotly_chart(fig_cum, use_container_width=True)
-            with c2:
-                avg_daily = trend_df.groupby("Date")["Relevance Score"].mean().reset_index()
-                fig_avg = px.line(avg_daily, x="Date", y="Relevance Score",
-                                  title="Average Relevance Score per Day", markers=True)
-                fig_avg.update_traces(line_color="#dc2626")
-                st.plotly_chart(fig_avg, use_container_width=True)
+        # Timeline if dates parse
+        if filtered_df["_date"].notna().sum() >= 2:
+            tdf = filtered_df.dropna(subset=["_date"]).copy()
+            tdf["Day"] = tdf["_date"].dt.date
+            daily = tdf.groupby(["Day", "Severity Level"]).size().reset_index(name="Count")
+            fig = px.bar(daily, x="Day", y="Count", color="Severity Level",
+                         color_discrete_map=SEVERITY_COLORS, title="Threats Over Time",
+                         category_orders={"Severity Level": SEVERITY_ORDER})
+            fig.update_layout(barmode="stack")
+            st.plotly_chart(fig, use_container_width=True)
 
-            if len(trend_df) >= 10:
-                trend_df["DayOfWeek"] = trend_df["_createdTime"].dt.day_name()
-                trend_df["Hour"] = trend_df["_createdTime"].dt.hour
-                dow_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-                pivot_hm = trend_df.groupby(["DayOfWeek", "Hour"]).size().reset_index(name="Count")
-                pivot_hm = pivot_hm.pivot(index="DayOfWeek", columns="Hour", values="Count").fillna(0)
-                pivot_hm = pivot_hm.reindex([d for d in dow_order if d in pivot_hm.index])
-                fig_hm = px.imshow(pivot_hm,
-                                   labels=dict(x="Hour (UTC)", y="Day", color="Threats"),
-                                   color_continuous_scale="Reds", aspect="auto",
-                                   title="Threat Ingestion by Day & Hour")
-                st.plotly_chart(fig_hm, use_container_width=True)
+# ----- IOCs -----
+with tab_iocs:
+    st.markdown("### Indicators of Compromise")
+    st.caption("Extracted from the IOC fields your n8n workflow populates.")
+    ips = [x for lst in filtered_df["IOC IPs"] for x in lst]
+    domains = [x for lst in filtered_df["IOC Domains"] for x in lst]
+    urls = [x for lst in filtered_df["IOC URLs"] for x in lst]
+    hashes = [x for lst in filtered_df["IOC Hashes"] for x in lst]
 
-# ----- MITRE ATT&CK -----
-with tab_mitre:
-    st.markdown("### MITRE ATT&CK Technique Mapping")
-    st.caption("Techniques are extracted from threat titles and summaries by matching T-ID patterns (e.g. T1566).")
-    all_techniques = [t for techs in filtered_df["_mitre"] for t in techs]
-    if not all_techniques:
-        st.info("No MITRE ATT&CK technique IDs detected. Have your AI pipeline tag summaries with technique IDs (e.g. 'T1566.001') for this view to populate.")
+    ic = st.columns(4)
+    ic[0].metric("IPs", len(ips))
+    ic[1].metric("Domains", len(domains))
+    ic[2].metric("URLs", len(urls))
+    ic[3].metric("Hashes", len(hashes))
+
+    if not any([ips, domains, urls, hashes]):
+        st.info("No IOCs in the current selection.")
     else:
-        tech_series = pd.Series(all_techniques)
-        tech_counts = tech_series.value_counts().reset_index()
-        tech_counts.columns = ["Technique ID", "Count"]
-        tech_counts["Technique Name"] = tech_counts["Technique ID"].apply(
-            lambda t: MITRE_TECHNIQUES.get(t.split(".")[0], "Unknown technique"))
-        tech_counts["Label"] = tech_counts["Technique ID"] + " — " + tech_counts["Technique Name"]
-        tech_counts["Link"] = tech_counts["Technique ID"].apply(
-            lambda t: f"https://attack.mitre.org/techniques/{t.replace('.', '/')}/")
-
-        c1, c2 = st.columns([2, 1])
-        with c1:
-            top_n = min(15, len(tech_counts))
-            fig_tech = px.bar(tech_counts.head(top_n), x="Count", y="Label",
-                              orientation="h", title=f"Top {top_n} ATT&CK Techniques",
-                              color="Count", color_continuous_scale="Reds")
-            fig_tech.update_layout(yaxis={"categoryorder": "total ascending"})
-            st.plotly_chart(fig_tech, use_container_width=True)
-        with c2:
-            st.markdown("**Technique References**")
-            for _, row in tech_counts.head(10).iterrows():
-                st.markdown(f"- [{row['Technique ID']}]({row['Link']}) — {row['Technique Name']} (×{row['Count']})")
-
-        st.markdown("#### Threats by Technique")
-        selected_tech = st.selectbox("Filter threats by technique", ["All"] + tech_counts["Technique ID"].tolist())
-        if selected_tech != "All":
-            tech_threats = filtered_df[filtered_df["_mitre"].apply(lambda techs: selected_tech in techs)]
-            st.dataframe(tech_threats[["Title", "_priority_effective", "Severity Level", "Relevance Score"]]
-                         .rename(columns={"_priority_effective": "Priority"}),
-                         use_container_width=True, hide_index=True)
+        ioc_type = st.radio("IOC type", ["IPs", "Domains", "URLs", "Hashes"], horizontal=True)
+        chosen = {"IPs": ips, "Domains": domains, "URLs": urls, "Hashes": hashes}[ioc_type]
+        if chosen:
+            counts = pd.Series(chosen).value_counts().reset_index()
+            counts.columns = [ioc_type, "Occurrences"]
+            st.dataframe(counts, use_container_width=True, hide_index=True, height=400)
+            st.download_button(f"📥 Export {ioc_type} (one per line)",
+                               data="\n".join(dict.fromkeys(chosen)),
+                               file_name=f"iocs_{ioc_type.lower()}_{datetime.now():%Y%m%d}.txt",
+                               mime="text/plain")
+        else:
+            st.info(f"No {ioc_type} in the current selection.")
 
 # ----- THREAT TABLE -----
 with tab_table:
     st.markdown("### Actionable Threats")
     st.caption(f"Showing {len(filtered_df)} threats")
-    table_df = filtered_df.copy()
-    table_df["CVEs"] = table_df["_cves"].apply(lambda lst: ", ".join(lst[:3]) if lst else "—")
-    table_df["TTPs"] = table_df["_mitre"].apply(lambda lst: ", ".join(lst[:3]) if lst else "—")
-    table_df["Priority"] = table_df["_priority_effective"]
-    display_cols = ["Title", "Relevance Score", "Priority", "Severity Level",
-                    "Affected Software", "CVEs", "TTPs"]
-    display_df = table_df[[c for c in display_cols if c in table_df.columns]].copy()
+    t = filtered_df.copy()
+    t["CVE IDs"] = t["CVEs"].apply(lambda x: ", ".join(x[:4]) if x else "—")
+    t["Attack Type"] = t["Attack Types"].apply(lambda x: ", ".join(x[:3]) if x else "—")
+    cols = ["Title", "Source", "Severity Level", "Relevance Score", "Attack Type", "CVE IDs"]
+    disp = t[cols].copy()
 
-    def color_severity(val):
-        c = SEVERITY_COLORS.get(str(val), "#6b7280")
-        return f"background-color: {c}; color: white; font-weight: bold; text-align: center;"
-    def color_priority(val):
-        c = PRIORITY_COLORS.get(str(val), "#6b7280")
-        return f"background-color: {c}; color: white; font-weight: bold; text-align: center;"
-    def color_score(val):
-        try: v = float(val)
+    def color_sev(v):
+        return f"background-color: {SEVERITY_COLORS.get(str(v), '#6b7280')}; color: white; font-weight: bold; text-align: center;"
+    def color_score(v):
+        try: x = float(v)
         except (TypeError, ValueError): return ""
-        if v >= 80: return "background-color: #dc2626; color: white; font-weight: bold;"
-        if v >= 60: return "background-color: #ea580c; color: white; font-weight: bold;"
-        if v >= 40: return "background-color: #ca8a04; color: white; font-weight: bold;"
-        return "background-color: #16a34a; color: white;"
+        if x >= 80: return "background-color: #dc2626; color: white;"
+        if x >= 60: return "background-color: #ea580c; color: white;"
+        if x >= 40: return "background-color: #ca8a04; color: white;"
+        if x > 0:  return "background-color: #16a34a; color: white;"
+        return "color: #9ca3af;"
 
-    # Styler.applymap was renamed to Styler.map in pandas 2.1
-    def apply_style(styler, fn, col):
-        if hasattr(styler, "map"):
-            return styler.map(fn, subset=[col])
-        return styler.applymap(fn, subset=[col])
-
-    styled = display_df.style
-    styled = apply_style(styled, color_severity, "Severity Level")
-    styled = apply_style(styled, color_priority, "Priority")
+    def apply_style(s, fn, col):
+        return s.map(fn, subset=[col]) if hasattr(s, "map") else s.applymap(fn, subset=[col])
+    styled = disp.style
+    styled = apply_style(styled, color_sev, "Severity Level")
     styled = apply_style(styled, color_score, "Relevance Score")
-    styled = styled.format({"Relevance Score": "{:.0f}"})
-    st.dataframe(styled, use_container_width=True, hide_index=True, height=500)
+    styled = styled.format({"Relevance Score": lambda v: f"{v:.0f}" if pd.notna(v) else "—"})
+    st.dataframe(styled, use_container_width=True, hide_index=True, height=520)
 
 # ----- DEEP DIVE -----
 with tab_dive:
     st.markdown("### Threat Deep Dive")
-    threat_titles = filtered_df["Title"].dropna().unique().tolist()
-    if not threat_titles:
+    titles = filtered_df["Title"].dropna().unique().tolist()
+    if not titles:
         st.info("No threats match the current filters.")
     else:
-        selected_threat = st.selectbox("Select a Threat", threat_titles)
-        details = filtered_df[filtered_df["Title"] == selected_threat].iloc[0]
+        sel = st.selectbox("Select a Threat", titles)
+        d = filtered_df[filtered_df["Title"] == sel].iloc[0]
+        sev = d["Severity Level"]
+        score = d["Relevance Score"]
 
-        priority = details.get("_priority_effective", "N/A")
-        severity = details.get("Severity Level", "N/A")
-        score = float(details.get("Relevance Score", 0))
-
-        b1, b2, b3 = st.columns(3)
-        b1.markdown(f"<div style='background:{PRIORITY_COLORS.get(priority, '#6b7280')};"
-                    f"padding:1rem;border-radius:8px;text-align:center;color:white;'>"
-                    f"<strong>Priority</strong><br/>{priority}</div>", unsafe_allow_html=True)
-        b2.markdown(f"<div style='background:{SEVERITY_COLORS.get(severity, '#6b7280')};"
-                    f"padding:1rem;border-radius:8px;text-align:center;color:white;'>"
-                    f"<strong>Severity</strong><br/>{severity}</div>", unsafe_allow_html=True)
-        b3.markdown(f"<div style='background:#1f2937;padding:1rem;border-radius:8px;"
-                    f"text-align:center;color:white;'>"
-                    f"<strong>Relevance Score</strong><br/>{score:.0f} / 100</div>", unsafe_allow_html=True)
+        b = st.columns(3)
+        b[0].markdown(f"<div style='background:{SEVERITY_COLORS.get(sev, '#6b7280')};padding:1rem;"
+                      f"border-radius:8px;text-align:center;color:white;'><strong>Severity</strong>"
+                      f"<br/>{sev}</div>", unsafe_allow_html=True)
+        b[1].markdown(f"<div style='background:#1f2937;padding:1rem;border-radius:8px;text-align:center;"
+                      f"color:white;'><strong>Relevance Score</strong><br/>"
+                      f"{f'{score:.0f} / 100' if pd.notna(score) and score > 0 else 'Not scored'}</div>",
+                      unsafe_allow_html=True)
+        b[2].markdown(f"<div style='background:#374151;padding:1rem;border-radius:8px;text-align:center;"
+                      f"color:white;'><strong>Source</strong><br/>{d['Source']}</div>",
+                      unsafe_allow_html=True)
 
         st.markdown("")
-        st.info(f"**Affected Software:** {details.get('Affected Software', 'Unknown')}")
-        st.markdown("#### AI Summary")
-        st.write(details.get("Summary", "No summary available."))
+        if d["Attack Types"]:
+            st.markdown("**Attack Types:** " + ", ".join(d["Attack Types"]))
+        if d["Affected Software"]:
+            st.info(f"**Affected Software:** {', '.join(d['Affected Software'])}")
+        st.markdown("#### Summary")
+        st.write(d["Summary"] or "No summary available.")
+        if d["URL"]:
+            st.markdown(f"[🔗 Original source]({d['URL'].split(',')[0].strip()})")
+        if d["Recommended Actions"]:
+            st.markdown("#### Recommended Actions")
+            st.write(d["Recommended Actions"])
 
-        threat_techs = details.get("_mitre", [])
-        if threat_techs:
-            st.markdown("#### MITRE ATT&CK Techniques")
-            for t in threat_techs:
-                name = MITRE_TECHNIQUES.get(t.split(".")[0], "Unknown technique")
-                url = f"https://attack.mitre.org/techniques/{t.replace('.', '/')}/"
-                st.markdown(f"- [`{t}`]({url}) — {name}")
+        # IOCs for this threat
+        threat_iocs = {"IPs": d["IOC IPs"], "Domains": d["IOC Domains"],
+                       "URLs": d["IOC URLs"], "Hashes": d["IOC Hashes"]}
+        if any(threat_iocs.values()):
+            st.markdown("#### Indicators of Compromise")
+            for k, v in threat_iocs.items():
+                if v:
+                    with st.expander(f"{k} ({len(v)})"):
+                        st.code("\n".join(v[:50]))
 
-        threat_cves = details.get("_cves", [])
-        if threat_cves:
+        # CVE enrichment from the real CVE IDs field
+        if d["CVEs"]:
             st.markdown("#### CVE Enrichment (NVD)")
-            for cve in threat_cves[:5]:
+            for cve in d["CVEs"][:5]:
                 with st.expander(f"📌 {cve}"):
                     info = fetch_nvd_cve(cve)
                     if not info:
-                        st.warning(f"Could not retrieve data for {cve}.")
+                        st.warning(f"Could not retrieve {cve}.")
                         continue
-                    cc1, cc2, cc3 = st.columns(3)
+                    cc = st.columns(3)
                     cvss = info.get("cvss_score")
-                    sev_nvd = info.get("severity") or "Unknown"
-                    sev_color_nvd = SEVERITY_COLORS.get(sev_nvd.title(), "#6b7280")
-                    cc1.markdown(f"<div style='background:{sev_color_nvd};padding:0.75rem;border-radius:6px;"
-                                 f"text-align:center;color:white;'><strong>CVSS</strong><br/>{cvss if cvss else '—'}</div>",
-                                 unsafe_allow_html=True)
-                    cc2.markdown(f"<div style='background:{sev_color_nvd};padding:0.75rem;border-radius:6px;"
-                                 f"text-align:center;color:white;'><strong>NVD Severity</strong><br/>{sev_nvd}</div>",
-                                 unsafe_allow_html=True)
-                    cc3.markdown(f"<div style='background:#1f2937;padding:0.75rem;border-radius:6px;"
-                                 f"text-align:center;color:white;'><strong>Published</strong><br/>"
-                                 f"{(info.get('published') or '')[:10] or '—'}</div>", unsafe_allow_html=True)
+                    nvd_sev = (info.get("severity") or "Unknown")
+                    color = SEVERITY_COLORS.get(nvd_sev.title(), "#6b7280")
+                    cc[0].markdown(f"<div style='background:{color};padding:.75rem;border-radius:6px;"
+                                   f"text-align:center;color:white;'><strong>CVSS</strong><br/>{cvss or '—'}</div>",
+                                   unsafe_allow_html=True)
+                    cc[1].markdown(f"<div style='background:{color};padding:.75rem;border-radius:6px;"
+                                   f"text-align:center;color:white;'><strong>NVD Severity</strong><br/>{nvd_sev}</div>",
+                                   unsafe_allow_html=True)
+                    cc[2].markdown(f"<div style='background:#1f2937;padding:.75rem;border-radius:6px;"
+                                   f"text-align:center;color:white;'><strong>Published</strong><br/>"
+                                   f"{(info.get('published') or '')[:10] or '—'}</div>", unsafe_allow_html=True)
                     if info.get("vector"): st.caption(f"Vector: `{info['vector']}`")
                     if info.get("description"): st.write(info["description"])
                     st.markdown(f"[View on NVD →]({info['link']})")
 
-        st.markdown("#### Send Alert for This Threat")
-        a1, a2 = st.columns(2)
-        with a1:
+        # Per-threat alert
+        st.markdown("#### Send Alert")
+        a = st.columns(2)
+        with a[0]:
             if st.button("💬 Send to Slack", key="dive_slack"):
-                ok, msg = send_slack_alert(f"🚨 {priority} threat: {selected_threat}",
-                                            blocks=build_slack_blocks_for_threat(details))
-                if ok:
-                    st.success("Sent to Slack")
-                    st.session_state.alert_log.append({"time": datetime.now(), "channel": "Slack", "target": selected_threat})
-                else: st.error(f"Failed: {msg}")
-        with a2:
+                ok, msg = send_slack_alert(f"🚨 {sev} threat: {sel}")
+                st.success("Sent") if ok else st.error(f"Failed: {msg}")
+                if ok: st.session_state.alert_log.append({"time": datetime.now(), "channel": "Slack", "target": sel})
+        with a[1]:
             if st.button("📧 Send to Email", key="dive_email"):
-                single_df = pd.DataFrame([details])
-                ok, msg = send_email_alert(f"🚨 Threat Intel Alert: {selected_threat[:60]}",
-                                            build_email_html_for_threats(single_df))
-                if ok:
-                    st.success("Email sent")
-                    st.session_state.alert_log.append({"time": datetime.now(), "channel": "Email", "target": selected_threat})
-                else: st.error(f"Failed: {msg}")
-
-        with st.expander("All fields"):
-            for col, val in details.items():
-                if not col.startswith("_") and pd.notna(val) if not isinstance(val, list) else val:
-                    st.write(f"**{col}:** {val}")
+                html = f"<h3>{sel}</h3><p>Severity: {sev}</p><p>{d['Summary'][:500]}</p>"
+                ok, msg = send_email_alert(f"Threat Alert: {sel[:60]}", html)
+                st.success("Sent") if ok else st.error(f"Failed: {msg}")
+                if ok: st.session_state.alert_log.append({"time": datetime.now(), "channel": "Email", "target": sel})
 
 # ----- ALERTS -----
 with tab_alerts:
@@ -738,100 +584,52 @@ with tab_alerts:
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("#### Slack")
-        if SLACK_WEBHOOK_URL:
-            st.success("✅ Slack webhook configured")
-        else:
-            st.warning("⚠️ No Slack webhook in secrets")
-            with st.expander("How to set up Slack alerts"):
-                st.code('SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/T.../B.../..."', language="toml")
+        st.success("✅ Slack webhook configured") if SLACK_WEBHOOK_URL else st.warning("⚠️ No Slack webhook in secrets")
         if st.button("📨 Send Slack Test"):
-            ok, msg = send_slack_alert("✅ Threat Intel Dashboard test alert — connection verified.")
-            if ok: st.success("Test sent")
-            else: st.error(f"Failed: {msg}")
-
+            ok, msg = send_slack_alert("✅ Threat Intel Dashboard test alert.")
+            st.success("Test sent") if ok else st.error(f"Failed: {msg}")
     with c2:
         st.markdown("#### Email (SMTP)")
-        smtp_ready = all([SMTP_HOST, SMTP_USER, SMTP_PASS, ALERT_TO_EMAIL])
-        if smtp_ready:
-            st.success(f"✅ SMTP configured ({SMTP_HOST}) → {ALERT_TO_EMAIL}")
-        else:
-            st.warning("⚠️ SMTP credentials incomplete")
-            with st.expander("How to set up email alerts"):
-                st.code('''SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 587
-SMTP_USER = "you@gmail.com"
-SMTP_PASS = "your-16-char-app-password"
-ALERT_TO_EMAIL = "soc@example.com"''', language="toml")
+        ready = all([SMTP_HOST, SMTP_USER, SMTP_PASS, ALERT_TO_EMAIL])
+        st.success(f"✅ SMTP configured → {ALERT_TO_EMAIL}") if ready else st.warning("⚠️ SMTP incomplete")
         if st.button("📨 Send Email Test"):
-            ok, msg = send_email_alert("Threat Intel Dashboard — Test Alert",
-                                       "<p>✅ Connection verified.</p>")
-            if ok: st.success("Test sent")
-            else: st.error(f"Failed: {msg}")
+            ok, msg = send_email_alert("Dashboard Test", "<p>✅ Connection verified.</p>")
+            st.success("Test sent") if ok else st.error(f"Failed: {msg}")
 
     st.divider()
-    st.markdown("#### Bulk Dispatch")
-    crit_threats = filtered_df[filtered_df["_priority_effective"] == "Critical"]
-    high_threats = filtered_df[filtered_df["_priority_effective"].isin(["Critical", "High"])]
-    st.caption(f"{len(crit_threats)} Critical / {len(high_threats)} Critical+High in current filter.")
-
-    bc1, bc2, bc3, bc4 = st.columns(4)
-    with bc1:
-        if st.button(f"💬 Slack all Critical ({len(crit_threats)})"):
-            sent, failed = 0, 0
-            for _, t in crit_threats.iterrows():
-                ok, _ = send_slack_alert(f"🚨 Critical: {t['Title']}",
-                                          blocks=build_slack_blocks_for_threat(t))
-                if ok: sent += 1
-                else: failed += 1
-            st.success(f"Slack: sent {sent}, failed {failed}")
-    with bc2:
-        if st.button(f"📧 Email all Critical ({len(crit_threats)})"):
-            if not crit_threats.empty:
-                ok, msg = send_email_alert(f"🚨 {len(crit_threats)} Critical Threats",
-                                           build_email_html_for_threats(crit_threats))
-                if ok: st.success("Email sent")
-                else: st.error(f"Failed: {msg}")
-            else: st.info("No Critical threats.")
-    with bc3:
-        if st.button(f"💬 Slack Critical+High ({len(high_threats)})"):
-            sent, failed = 0, 0
-            for _, t in high_threats.iterrows():
-                ok, _ = send_slack_alert(f"🚨 {t['_priority_effective']}: {t['Title']}",
-                                          blocks=build_slack_blocks_for_threat(t))
-                if ok: sent += 1
-                else: failed += 1
-            st.success(f"Slack: sent {sent}, failed {failed}")
-    with bc4:
-        if st.button(f"📧 Email Critical+High ({len(high_threats)})"):
-            if not high_threats.empty:
-                ok, msg = send_email_alert(f"🚨 {len(high_threats)} Critical & High Threats",
-                                           build_email_html_for_threats(high_threats))
-                if ok: st.success("Email sent")
-                else: st.error(f"Failed: {msg}")
+    crit_df = filtered_df[filtered_df["Severity Level"] == "Critical"]
+    high_df = filtered_df[filtered_df["Severity Level"].isin(["Critical", "High"])]
+    st.caption(f"{len(crit_df)} Critical / {len(high_df)} Critical+High in current filter.")
+    bc = st.columns(2)
+    with bc[0]:
+        if st.button(f"💬 Slack all Critical ({len(crit_df)})"):
+            sent = sum(send_slack_alert(f"🚨 Critical: {t['Title']}")[0] for _, t in crit_df.iterrows())
+            st.success(f"Sent {sent}")
+    with bc[1]:
+        if st.button(f"💬 Slack Critical+High ({len(high_df)})"):
+            sent = sum(send_slack_alert(f"🚨 {t['Severity Level']}: {t['Title']}")[0] for _, t in high_df.iterrows())
+            st.success(f"Sent {sent}")
 
     st.divider()
-    st.markdown("#### Recent Alert Log (this session)")
+    st.markdown("#### Alert Log (this session)")
     if st.session_state.alert_log:
-        log_df = pd.DataFrame(st.session_state.alert_log)
-        log_df["time"] = log_df["time"].astype(str)
-        st.dataframe(log_df.iloc[::-1], use_container_width=True, hide_index=True)
-        if st.button("Clear log"):
-            st.session_state.alert_log = []
-            st.rerun()
+        log = pd.DataFrame(st.session_state.alert_log)
+        log["time"] = log["time"].astype(str)
+        st.dataframe(log.iloc[::-1], use_container_width=True, hide_index=True)
     else:
-        st.caption("No alerts sent yet in this session.")
+        st.caption("No alerts sent yet.")
 
 # ----- EXPORT -----
 with tab_export:
     st.markdown("### Export Filtered Data")
     st.write(f"Export {len(filtered_df)} filtered threats")
-    export_df = filtered_df.drop(columns=["_createdTime", "_cves", "_mitre",
-                                          "_priority_effective", "_priority_fallback_used"],
-                                  errors="ignore").copy()
-    export_df["CVEs"] = filtered_df["_cves"].apply(lambda lst: ", ".join(lst))
-    export_df["MITRE Techniques"] = filtered_df["_mitre"].apply(lambda lst: ", ".join(lst))
+    exp = filtered_df.copy()
+    for c in ["Attack Types", "Affected Software", "CVEs", "Tags",
+              "IOC IPs", "IOC Domains", "IOC URLs", "IOC Hashes"]:
+        exp[c] = exp[c].apply(lambda x: ", ".join(x) if isinstance(x, list) else x)
+    exp = exp.drop(columns=["_date"], errors="ignore")
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    st.download_button("📥 Download CSV", data=export_df.to_csv(index=False),
+    st.download_button("📥 Download CSV", data=exp.to_csv(index=False),
                        file_name=f"threat_intel_{stamp}.csv", mime="text/csv")
-    st.download_button("📥 Download JSON", data=export_df.to_json(orient="records", indent=2),
+    st.download_button("📥 Download JSON", data=exp.to_json(orient="records", indent=2),
                        file_name=f"threat_intel_{stamp}.json", mime="application/json")
