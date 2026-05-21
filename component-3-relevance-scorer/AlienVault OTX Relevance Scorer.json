@@ -1,0 +1,314 @@
+{
+  "name": "AlienVault OTX Relevance Scorer",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "44b10952-8fa6-4125-a509-fa10f3fa1d1f",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        2224,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appvjtsGiE98O1MhU",
+          "mode": "list",
+          "cachedResultName": "Capstone Project",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tbl1bXDTzv8jiVnQ1",
+          "mode": "list",
+          "cachedResultName": "AlienVault_OTX",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU/tbl1bXDTzv8jiVnQ1"
+        },
+        "filterByFormula": "AND({Relevance Score} = 0, OR({Summary} != '', {description} != '', {title} != ''))",
+        "options": {}
+      },
+      "id": "7d5f96b7-2e2a-42c0-b32c-8b2a4a47b686",
+      "name": "Get Unscored OTX Records",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        2448,
+        96
+      ],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "RCWlut1kLQ8kDtTn",
+          "name": "Airtable Personal Access Token account 56"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// HARDCODE YOUR TECH STACK HERE\nconst myTechStack = \"Windows Server 2022, Python 3.9, Apache Tomcat, AWS EC2\";\n\nreturn items.map(item => {\n  const fields = item.json.fields || item.json;\n\n  // Pull richest available text - OTX has different field names than Krebs/NVD\n  const title = fields['title'] || fields['Title'] || 'Untitled';\n  const affectedSoftware = fields['Affected Software'] || '';\n  const malwareFamilies = fields['malware_families'] || '';\n  const adversary = fields['adversary'] || '';\n  const industries = fields['industries'] || '';\n  const tags = fields['tags'] || '';\n  const cveFids = fields['CVE IDs'] || '';\n\n  // Use AI Summary first, then plain Summary, then raw description\n  const threatText = fields['AI Summary'] || fields['Summary'] || fields['description'] || 'No description available.';\n\n  const prompt = `You are an expert cybersecurity analyst. Evaluate a threat intelligence pulse against this specific technology stack: ${myTechStack}\n\nThreat Title: ${title}\nMalware Families: ${malwareFamilies || 'Not specified'}\nAdversary: ${adversary || 'Not specified'}\nIndustries Targeted: ${industries || 'Not specified'}\nTags: ${tags || 'None'}\nCVE IDs: ${cveFids || 'None'}\nAffected Software: ${affectedSoftware || 'Not specified'}\nThreat Summary: ${threatText}\n\nEvaluate the overlap between this threat and the tech stack. Consider:\n- Does the malware or adversary target Windows Server, Python, Tomcat, or AWS environments?\n- Do the CVEs or affected software match anything in the stack?\n- Even indirect relevance (e.g. credential theft, supply chain) counts for partial scores.\n\nOutput strictly in JSON format with one key:\n- \"score\": A number from 0 to 100 representing how relevant this threat is to the tech stack. Use 0 only if there is truly zero relevance.\n\nDo not include any markdown formatting, backticks, or extra text. Just the JSON object.`;\n\n  return {\n    json: {\n      recordId: item.json.id,\n      prompt: prompt\n    }\n  };\n});"
+      },
+      "id": "299f8045-6d85-472b-822d-c960ec2da190",
+      "name": "Prepare Groq Prompts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2672,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "b14645ea-4bb4-439f-8d0e-16334f3eacff",
+      "name": "Loop One at a Time",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        2896,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a cybersecurity threat intelligence analyst. Return only valid JSON.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json[\"prompt\"]) }}\n    }\n  ],\n  \"temperature\": 0.2,\n  \"response_format\": {\n    \"type\": \"json_object\"\n  }\n}",
+        "options": {}
+      },
+      "id": "0dac6341-05f3-4f38-b765-9856468a62f5",
+      "name": "Call Groq API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        3120,
+        96
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "pifaN7uzWvLlY27o",
+          "name": "Header Auth account 58"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.map(item => {\n  const recordId = item.json.recordId;\n  let score = 0;\n\n  try {\n    const content = item.json.choices[0].message.content;\n    const parsed = JSON.parse(content);\n    score = parsed.score || 0;\n  } catch (error) {\n    score = 0;\n  }\n\n  return {\n    json: {\n      recordId: recordId,\n      score: score\n    }\n  };\n});"
+      },
+      "id": "0a55170d-017a-4b6b-9431-c0939d43f6ae",
+      "name": "Parse Groq Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3344,
+        96
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "value": "appvjtsGiE98O1MhU",
+          "mode": "list",
+          "cachedResultName": "Capstone Project",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tbl1bXDTzv8jiVnQ1",
+          "mode": "list",
+          "cachedResultName": "AlienVault_OTX",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU/tbl1bXDTzv8jiVnQ1"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "id": "={{ $('Get Unscored OTX Records').item.json.id }}",
+            "Relevance Score": "={{ $json.score }}"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": true
+            },
+            {
+              "id": "Relevance Score",
+              "displayName": "Relevance Score",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "783907bb-c09d-47bd-ba96-e7f75361b6d6",
+      "name": "Update OTX Relevance Score",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        3568,
+        96
+      ],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "RCWlut1kLQ8kDtTn",
+          "name": "Airtable Personal Access Token account 56"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 3
+      },
+      "id": "fa80af1c-1443-4853-b687-943c43ed00ca",
+      "name": "Wait 3s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        3792,
+        96
+      ],
+      "webhookId": "wait-3s-otx-scorer"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Unscored OTX Records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Unscored OTX Records": {
+      "main": [
+        [
+          {
+            "node": "Prepare Groq Prompts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Groq Prompts": {
+      "main": [
+        [
+          {
+            "node": "Loop One at a Time",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop One at a Time": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Call Groq API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Groq API": {
+      "main": [
+        [
+          {
+            "node": "Parse Groq Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Groq Response": {
+      "main": [
+        [
+          {
+            "node": "Update OTX Relevance Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update OTX Relevance Score": {
+      "main": [
+        [
+          {
+            "node": "Wait 3s",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 3s": {
+      "main": [
+        [
+          {
+            "node": "Loop One at a Time",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "87fa01c4-c9a5-445e-b5aa-56e17b3edd03",
+  "meta": {
+    "instanceId": "a69ec37954977b88a479ebfa185a30fc778ae1a13872bdbe9e26e7b8edafd875"
+  },
+  "id": "wC1KArA66CageUxx",
+  "tags": []
+}
