@@ -1,0 +1,21 @@
+# Streamlit secrets — NEVER commit
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local data exports
+*.csv
+*.json
+!requirements.json
