@@ -1,0 +1,656 @@
+{
+  "name": "AlienVault OTX - Direct IOC Extractor and Summarizer",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -160,
+        304
+      ],
+      "id": "8e4b361b-8552-47f7-9566-5d151bb8000f",
+      "name": "Manual Trigger"
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appvjtsGiE98O1MhU",
+          "mode": "list",
+          "cachedResultName": "Capstone Project",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tbl1bXDTzv8jiVnQ1",
+          "mode": "list",
+          "cachedResultName": "AlienVault_OTX",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU/tbl1bXDTzv8jiVnQ1"
+        },
+        "filterByFormula": "AND({pulse_id} != '', OR({AI Processed} = 0, {AI Processed} = BLANK()), OR({description} != '', {title} != ''))",
+        "returnAll": false,
+        "limit": 50,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        80,
+        304
+      ],
+      "id": "a6156a97-ca39-4c45-b9a3-33cfd6fb32f1",
+      "name": "Get AlienVault OTX Records",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "RCWlut1kLQ8kDtTn",
+          "name": "Airtable Personal Access Token account 56"
+        }
+      },
+      "notes": "Reads only unprocessed AlienVault_OTX rows. Increase the limit after testing."
+    },
+    {
+      "parameters": {
+        "url": "=https://otx.alienvault.com/api/v1/pulses/{{$json[\"fields\"][\"pulse_id\"]}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-OTX-API-KEY",
+              "value": "7889dfc42079dbbcb3c8e8f0f0cec83c0b9e1d8511de5090133447bf0948a0be"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        320,
+        304
+      ],
+      "id": "3816914d-f138-429a-a1a1-036ed364a936",
+      "name": "Get Full OTX Pulse Details",
+      "notes": "Replace PASTE_YOUR_OTX_API_KEY_HERE with your AlienVault OTX API key. This node retrieves the structured indicators array."
+    },
+    {
+      "parameters": {
+        "jsCode": "const output = [];\n\nfunction unique(values) {\n  return [...new Set(values.map(v => String(v || \"\").trim()).filter(Boolean))];\n}\n\nfunction cleanText(value) {\n  return String(value || \"\")\n    .replace(/<[^>]*>/g, \" \")\n    .replace(/\\s+/g, \" \")\n    .trim();\n}\n\nfunction asText(value) {\n  if (!value) return \"\";\n  if (Array.isArray(value)) {\n    return value.map(v => {\n      if (typeof v === \"object\" && v !== null) {\n        return v.display_name || v.name || v.title || JSON.stringify(v);\n      }\n      return String(v);\n    }).filter(Boolean).join(\", \");\n  }\n  if (typeof value === \"object\") return JSON.stringify(value);\n  return String(value);\n}\n\nfunction extractIndicators(indicators) {\n  const ips = [];\n  const urls = [];\n  const emails = [];\n  const domains = [];\n  const hashes = [];\n  const cves = [];\n\n  for (const indicator of indicators) {\n    const value = indicator.indicator || indicator.value || indicator.ioc || \"\";\n    const type = String(indicator.type || indicator.indicator_type || \"\").toLowerCase();\n\n    if (!value) continue;\n\n    if ([\"ipv4\", \"ipv6\", \"ip\", \"ipv4-addr\", \"ipv6-addr\"].includes(type)) {\n      ips.push(value);\n    } else if ([\"url\", \"uri\"].includes(type)) {\n      urls.push(value);\n    } else if ([\"email\", \"emailaddress\", \"email-addr\"].includes(type)) {\n      emails.push(value);\n    } else if ([\"domain\", \"hostname\", \"fqdn\"].includes(type)) {\n      domains.push(value);\n    } else if (\n      [\"filehash-md5\", \"filehash-sha1\", \"filehash-sha256\", \"md5\", \"sha1\", \"sha256\"].includes(type) ||\n      type.includes(\"hash\")\n    ) {\n      hashes.push(value);\n    } else if (type === \"cve\") {\n      cves.push(value);\n    }\n  }\n\n  return {\n    ips: unique(ips),\n    urls: unique(urls),\n    emails: unique(emails),\n    domains: unique(domains),\n    hashes: unique(hashes),\n    cves: unique(cves)\n  };\n}\n\nfunction classifySeverity(text) {\n  const lower = text.toLowerCase();\n  if (\n    lower.includes(\"zero-day\") ||\n    lower.includes(\"0-day\") ||\n    lower.includes(\"remote code execution\") ||\n    lower.includes(\"rce\") ||\n    lower.includes(\"ransomware\") ||\n    lower.includes(\"credential theft\") ||\n    lower.includes(\"data exfiltration\") ||\n    lower.includes(\"worm\")\n  ) {\n    return \"High\";\n  }\n  if (\n    lower.includes(\"phishing\") ||\n    lower.includes(\"malware\") ||\n    lower.includes(\"botnet\") ||\n    lower.includes(\"exploit\") ||\n    lower.includes(\"backdoor\") ||\n    lower.includes(\"trojan\")\n  ) {\n    return \"Medium\";\n  }\n  return \"Unknown\";\n}\n\nfunction classifyAttackType(text) {\n  const lower = text.toLowerCase();\n  const types = [];\n\n  if (lower.includes(\"phishing\")) types.push(\"Phishing\");\n  if (lower.includes(\"ransomware\")) types.push(\"Ransomware\");\n  if (lower.includes(\"malware\")) types.push(\"Malware\");\n  if (lower.includes(\"botnet\")) types.push(\"Botnet\");\n  if (lower.includes(\"credential\")) types.push(\"Credential Theft\");\n  if (lower.includes(\"backdoor\")) types.push(\"Backdoor\");\n  if (lower.includes(\"trojan\")) types.push(\"Trojan\");\n  if (lower.includes(\"exploit\") || lower.includes(\"rce\") || lower.includes(\"remote code execution\")) types.push(\"Exploit\");\n  if (lower.includes(\"exfiltration\")) types.push(\"Data Exfiltration\");\n\n  return unique(types).join(\", \") || \"Unknown\";\n}\n\nfor (let i = 0; i < items.length; i++) {\n  const pulse = items[i].json || {};\n  const originalItem = $items(\"Get AlienVault OTX Records\")[i];\n  const originalFields = originalItem.json.fields || {};\n\n  const recordId = originalItem.json.id;\n  const pulseId = originalFields[\"pulse_id\"] || pulse.id || \"\";\n  const title = originalFields[\"title\"] || pulse.name || \"Untitled OTX Pulse\";\n  const description = cleanText(originalFields[\"description\"] || pulse.description || \"\");\n  const author = originalFields[\"author\"] || pulse.author_name || \"AlienVault\";\n  const created = originalFields[\"created\"] || pulse.created || \"\";\n  const modified = originalFields[\"modified\"] || pulse.modified || \"\";\n  const tags = asText(pulse.tags || originalFields[\"tags\"]);\n  const malwareFamilies = asText(pulse.malware_families || originalFields[\"malware_families\"]);\n  const industries = asText(pulse.industries || originalFields[\"industries\"]);\n  const adversary = asText(pulse.adversary || originalFields[\"adversary\"]);\n  const references = asText(pulse.references || originalFields[\"references\"]);\n  const tlp = originalFields[\"TLP\"] || pulse.tlp || \"\";\n  const indicators = Array.isArray(pulse.indicators) ? pulse.indicators : [];\n\n  const extracted = extractIndicators(indicators);\n\n  const shortDescription = description.length > 450\n    ? description.slice(0, 450) + \"...\"\n    : description;\n\n  const summary = `${title}. ${shortDescription}`.trim();\n  const combinedText = `${title} ${description} ${tags} ${malwareFamilies}`;\n\n  const recommendedActions = [\n    \"Review extracted indicators in SIEM, EDR, firewall, proxy, DNS, and email logs.\",\n    \"Block confirmed malicious IPs, domains, URLs, and hashes where appropriate.\",\n    \"Prioritize CVEs and affected software mentioned in the pulse.\",\n    \"Investigate endpoints or accounts that contacted the extracted IOCs.\",\n    \"Validate indicators before production blocking to reduce false positives.\"\n  ].join(\"\\n\");\n\n  output.push({\n    json: {\n      id: recordId,\n      source: originalFields[\"source\"] || \"AlienVault OTX\",\n      pulse_id: pulseId,\n      title,\n      description,\n      author,\n      created,\n      modified,\n      tags,\n      malware_families: malwareFamilies,\n      industries,\n      adversary,\n      references,\n      TLP: tlp,\n      indicator_count: indicators.length || originalFields[\"indicator_count\"] || 0,\n\n      \"Summary\": summary,\n      \"AI Summary\": summary,\n      \"Severity Level\": classifySeverity(combinedText),\n      \"Attack Type\": classifyAttackType(combinedText),\n      \"Affected Software\": malwareFamilies,\n      \"CVE IDs\": extracted.cves.join(\", \"),\n      \"IOC IPs\": extracted.ips.join(\", \"),\n      \"IOC Domains\": extracted.domains.join(\", \"),\n      \"IOC URLs\": extracted.urls.join(\", \"),\n      \"IOC Hashes\": extracted.hashes.join(\", \"),\n      \"IOC Emails\": extracted.emails.join(\", \"),\n      \"Recommended Actions\": recommendedActions,\n      \"Recommended Action\": recommendedActions,\n      \"Raw Indicators\": JSON.stringify(indicators, null, 2),\n      \"AI Raw Response\": \"No Flowise used. IOCs extracted directly from AlienVault OTX structured indicators. Summary generated with deterministic n8n logic.\",\n      \"AI Processed\": true,\n      \"Last Processed\": new Date().toISOString(),\n      \"Relevance Score\": 0\n    }\n  });\n}\n\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        304
+      ],
+      "id": "ece42e8d-cb78-4337-ab4a-ab5e593da938",
+      "name": "Extract OTX IOCs + Basic Summary",
+      "alwaysOutputData": true,
+      "notes": "Extracts IOC IPs, URLs, emails, domains, hashes, and CVEs directly from the OTX indicators array. No Flowise/Groq required."
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "value": "appvjtsGiE98O1MhU",
+          "mode": "list",
+          "cachedResultName": "Capstone Project",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tbl1bXDTzv8jiVnQ1",
+          "mode": "list",
+          "cachedResultName": "AlienVault_OTX",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU/tbl1bXDTzv8jiVnQ1"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "id": "={{ $json.id }}",
+            "source": "={{ $json.source }}",
+            "pulse_id": "={{ $json.pulse_id }}",
+            "title": "={{ $json.title }}",
+            "description": "={{ $json.description }}",
+            "author": "={{ $json.author }}",
+            "created": "={{ $json.created }}",
+            "modified": "={{ $json.modified }}",
+            "tags": "={{ $json.tags }}",
+            "malware_families": "={{ $json.malware_families }}",
+            "industries": "={{ $json.industries }}",
+            "adversary": "={{ $json.adversary }}",
+            "references": "={{ $json.references }}",
+            "TLP": "={{ $json.TLP }}",
+            "indicator_count": "={{ $json.indicator_count }}",
+            "AI Summary": "={{ $json['AI Summary'] }}",
+            "Summary": "={{ $json.Summary }}",
+            "Severity Level": "={{ $json['Severity Level'] }}",
+            "Attack Type": "={{ $json['Attack Type'] }}",
+            "Affected Software": "={{ $json['Affected Software'] }}",
+            "CVE IDs": "={{ $json['CVE IDs'] }}",
+            "IOC IPs": "={{ $json['IOC IPs'] }}",
+            "IOC Domains": "={{ $json['IOC Domains'] }}",
+            "IOC URLs": "={{ $json['IOC URLs'] }}",
+            "IOC Hashes": "={{ $json['IOC Hashes'] }}",
+            "IOC Emails": "={{ $json['IOC Emails'] }}",
+            "Recommended Action": "={{ $json['Recommended Action'] }}",
+            "Recommended Actions": "={{ $json['Recommended Actions'] }}",
+            "Raw Indicators": "={{ $json['Raw Indicators'] }}",
+            "AI Raw Response": "={{ $json['AI Raw Response'] }}",
+            "AI Processed": "={{ $json['AI Processed'] }}",
+            "Last Processed": "={{ $json['Last Processed'] }}",
+            "Relevance Score": "={{ $json['Relevance Score'] }}"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": true
+            },
+            {
+              "id": "source",
+              "displayName": "source",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "pulse_id",
+              "displayName": "pulse_id",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "title",
+              "displayName": "title",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "description",
+              "displayName": "description",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "author",
+              "displayName": "author",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "created",
+              "displayName": "created",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "modified",
+              "displayName": "modified",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "tags",
+              "displayName": "tags",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "malware_families",
+              "displayName": "malware_families",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "industries",
+              "displayName": "industries",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "adversary",
+              "displayName": "adversary",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "references",
+              "displayName": "references",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "public",
+              "displayName": "public",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "boolean",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "TLP",
+              "displayName": "TLP",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "indicator_count",
+              "displayName": "indicator_count",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "export_time",
+              "displayName": "export_time",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "AI Summary",
+              "displayName": "AI Summary",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Severity Level",
+              "displayName": "Severity Level",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Attack Type",
+              "displayName": "Attack Type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Affected Software",
+              "displayName": "Affected Software",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "IOC IPs",
+              "displayName": "IOC IPs",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "IOC Key",
+              "displayName": "IOC Key",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Threat Actors AI",
+              "displayName": "Threat Actors AI",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Recommended Action",
+              "displayName": "Recommended Action",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "AI Processed",
+              "displayName": "AI Processed",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "boolean",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Summary",
+              "displayName": "Summary",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "CVE IDs",
+              "displayName": "CVE IDs",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "IOC URLs",
+              "displayName": "IOC URLs",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "IOC Emails",
+              "displayName": "IOC Emails",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Recommended Actions",
+              "displayName": "Recommended Actions",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "AI Raw Response",
+              "displayName": "AI Raw Response",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Last Processed",
+              "displayName": "Last Processed",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Relevance Score",
+              "displayName": "Relevance Score",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "IOC Domains",
+              "displayName": "IOC Domains",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "IOC Hashes",
+              "displayName": "IOC Hashes",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Raw Indicators",
+              "displayName": "Raw Indicators",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "MITRE ATT&CK",
+              "displayName": "MITRE ATT&CK",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "typecast": true
+        }
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        800,
+        304
+      ],
+      "id": "f2bb2fa5-9518-46d8-b476-31369b4eb9ab",
+      "name": "Update AlienVault_OTX Record",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "RCWlut1kLQ8kDtTn",
+          "name": "Airtable Personal Access Token account 56"
+        }
+      },
+      "notes": "Updates the original AlienVault_OTX row with summary and structured IOCs."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get AlienVault OTX Records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get AlienVault OTX Records": {
+      "main": [
+        [
+          {
+            "node": "Get Full OTX Pulse Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Full OTX Pulse Details": {
+      "main": [
+        [
+          {
+            "node": "Extract OTX IOCs + Basic Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract OTX IOCs + Basic Summary": {
+      "main": [
+        [
+          {
+            "node": "Update AlienVault_OTX Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "b796e5f9-0971-4f29-b2fd-63c83c59a711",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "a69ec37954977b88a479ebfa185a30fc778ae1a13872bdbe9e26e7b8edafd875"
+  },
+  "id": "Y7yTgKah1GB4j8wF",
+  "tags": []
+}

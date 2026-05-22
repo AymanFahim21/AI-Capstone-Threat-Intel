@@ -1,0 +1,1546 @@
+{
+  "name": "Krebs and NVD IOC Extractor and summarizer",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -3088,
+        416
+      ],
+      "id": "2a2aab2b-d044-4d90-8fad-91ae3c3a5c2d",
+      "name": "Manual Trigger"
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appvjtsGiE98O1MhU",
+          "mode": "list",
+          "cachedResultName": "Capstone Project",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblhkkgT7prpJdO4i",
+          "mode": "list",
+          "cachedResultName": "Threats",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU/tblhkkgT7prpJdO4i"
+        },
+        "filterByFormula": "AND({Processing Status} = 'New', OR({Raw Description} != '', {Raw Content} != '', {Title} != ''), OR({AI Processed} = 0, {AI Processed} = BLANK()), {IOC Value} = BLANK())",
+        "returnAll": false,
+        "limit": 10,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        -2800,
+        416
+      ],
+      "id": "9b9b84cb-48fd-4416-a36b-75317393a70d",
+      "name": "Get New Krebs/NVD Threat Records",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "RCWlut1kLQ8kDtTn",
+          "name": "Airtable Personal Access Token account 56"
+        }
+      },
+      "notes": "Pulls unprocessed Krebs RSS and NVD CVE rows from the Threats table. No Flowise/Groq is used."
+    },
+    {
+      "parameters": {
+        "jsCode": "function unique(values) {\n  return [...new Set((values || []).map(v => String(v || \"\").trim()).filter(Boolean))];\n}\n\nfunction cleanHtml(value) {\n  return String(value || \"\")\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, \" \")\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, \" \")\n    .replace(/<[^>]*>/g, \" \")\n    .replace(/&nbsp;/g, \" \")\n    .replace(/&amp;/g, \"&\")\n    .replace(/&#8217;/g, \"'\")\n    .replace(/&#8220;/g, '\"')\n    .replace(/&#8221;/g, '\"')\n    .replace(/&#8211;|&#8212;/g, \"-\")\n    .replace(/\\s+/g, \" \")\n    .trim();\n}\n\nfunction truncate(value, max = 700) {\n  const text = cleanHtml(value);\n  return text.length > max ? text.slice(0, max - 3).trim() + \"...\" : text;\n}\n\nfunction extractUrls(text) {\n  const matches = String(text || \"\").match(/\\bhttps?:\\/\\/[^\\s\"'<>),]+/gi) || [];\n  return unique(matches.map(u => u.replace(/[.,;:!?]+$/g, \"\")));\n}\n\nfunction extractEmails(text) {\n  return unique(String(text || \"\").match(/\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b/gi) || []);\n}\n\nfunction extractIps(text) {\n  const ipv4 = String(text || \"\").match(/\\b(?:(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\b/g) || [];\n  const ipv6 = String(text || \"\").match(/\\b(?:[A-F0-9]{1,4}:){2,7}[A-F0-9]{1,4}\\b/gi) || [];\n  return unique([...ipv4, ...ipv6]);\n}\n\nfunction extractHashes(text) {\n  const md5 = String(text || \"\").match(/\\b[a-fA-F0-9]{32}\\b/g) || [];\n  const sha1 = String(text || \"\").match(/\\b[a-fA-F0-9]{40}\\b/g) || [];\n  const sha256 = String(text || \"\").match(/\\b[a-fA-F0-9]{64}\\b/g) || [];\n  return unique([...md5, ...sha1, ...sha256]);\n}\n\nfunction extractCves(text) {\n  return unique(String(text || \"\").match(/\\bCVE-\\d{4}-\\d{4,7}\\b/gi) || []).map(c => c.toUpperCase());\n}\n\nfunction extractDomains(text, urls) {\n  const fromUrls = [];\n  for (const url of urls || []) {\n    try {\n      const host = new URL(url).hostname.replace(/^www\\./, \"\");\n      if (host) fromUrls.push(host);\n    } catch (e) {}\n  }\n\n  const candidates = String(text || \"\").match(/\\b(?:[a-zA-Z0-9-]{2,63}\\.)+[a-zA-Z]{2,24}\\b/g) || [];\n  const blocked = new Set([\n    \"krebsonsecurity.com\", \"nist.gov\", \"nvd.nist.gov\", \"cisa.gov\", \"github.com\",\n    \"microsoft.com\", \"google.com\", \"apple.com\", \"mozilla.org\", \"oracle.com\",\n    \"example.com\", \"example.org\", \"w3.org\"\n  ]);\n\n  const cleaned = candidates\n    .map(d => d.toLowerCase().replace(/^www\\./, \"\").replace(/[.,;:!?]+$/g, \"\"))\n    .filter(d => !blocked.has(d))\n    .filter(d => !/^\\d+\\.\\d+\\.\\d+\\.\\d+$/.test(d));\n\n  return unique([...fromUrls, ...cleaned]);\n}\n\nfunction extractAffectedSoftware(text) {\n  const software = [];\n\n  // CPE strings from NVD content, if present.\n  const cpes = String(text || \"\").match(/cpe:2\\.3:[aho]:[^:\\s]+:[^:\\s]+/gi) || [];\n  for (const cpe of cpes) {\n    const parts = cpe.split(\":\");\n    if (parts.length >= 5) {\n      const vendor = parts[3].replace(/_/g, \" \");\n      const product = parts[4].replace(/_/g, \" \");\n      if (vendor && product) software.push(`${vendor} ${product}`);\n    }\n  }\n\n  const keywords = [\n    \"Windows Server\", \"Microsoft Windows\", \"Microsoft Office\", \"Microsoft Exchange\",\n    \"Apache Tomcat\", \"Apache Struts\", \"Apache HTTP Server\", \"OpenSSL\",\n    \"Cisco IOS\", \"Cisco ASA\", \"Fortinet\", \"FortiOS\", \"Palo Alto\", \"PAN-OS\",\n    \"Ivanti\", \"MOVEit\", \"WordPress\", \"Drupal\", \"Joomla\", \"VMware\", \"vCenter\",\n    \"Linux Kernel\", \"Ubuntu\", \"Debian\", \"Chrome\", \"Firefox\", \"Edge\", \"Android\",\n    \"iOS\", \"macOS\", \"Docker\", \"Kubernetes\", \"Redis\", \"Oracle\", \"SAP\", \"Adobe Reader\"\n  ];\n\n  const lower = String(text || \"\").toLowerCase();\n  for (const keyword of keywords) {\n    if (lower.includes(keyword.toLowerCase())) software.push(keyword);\n  }\n\n  return unique(software).slice(0, 20);\n}\n\nfunction detectSeverity(text) {\n  const lower = String(text || \"\").toLowerCase();\n\n  const cvssScores = [...String(text || \"\").matchAll(/cvss[^0-9]{0,20}([0-9]\\.[0-9]|10\\.0)/gi)]\n    .map(m => Number(m[1]))\n    .filter(n => !Number.isNaN(n));\n\n  const maxCvss = cvssScores.length ? Math.max(...cvssScores) : null;\n  if (maxCvss !== null) {\n    if (maxCvss >= 9.0) return \"Critical\";\n    if (maxCvss >= 7.0) return \"High\";\n    if (maxCvss >= 4.0) return \"Medium\";\n    return \"Low\";\n  }\n\n  if (lower.includes(\"critical\") || lower.includes(\"zero-day\") || lower.includes(\"0-day\") || lower.includes(\"remote code execution\") || lower.includes(\"rce\")) return \"Critical\";\n  if (lower.includes(\"ransomware\") || lower.includes(\"credential theft\") || lower.includes(\"exploited in the wild\") || lower.includes(\"active exploitation\")) return \"High\";\n  if (lower.includes(\"malware\") || lower.includes(\"phishing\") || lower.includes(\"botnet\") || lower.includes(\"exploit\")) return \"Medium\";\n  return \"Unknown\";\n}\n\nfunction detectAttackType(text) {\n  const lower = String(text || \"\").toLowerCase();\n\n  const types = [];\n  if (lower.includes(\"phishing\") || lower.includes(\"social engineering\")) types.push(\"Phishing/Social Engineering\");\n  if (lower.includes(\"ransomware\")) types.push(\"Ransomware\");\n  if (lower.includes(\"malware\") || lower.includes(\"trojan\") || lower.includes(\"backdoor\") || lower.includes(\"worm\")) types.push(\"Malware\");\n  if (lower.includes(\"botnet\")) types.push(\"Botnet\");\n  if (lower.includes(\"credential\") || lower.includes(\"password\") || lower.includes(\"infostealer\") || lower.includes(\"stealer\")) types.push(\"Credential Theft\");\n  if (lower.includes(\"remote code execution\") || lower.includes(\"rce\") || lower.includes(\"exploit\") || lower.includes(\"vulnerability\")) types.push(\"Vulnerability Exploit\");\n  if (lower.includes(\"ddos\") || lower.includes(\"denial-of-service\") || lower.includes(\"denial of service\")) types.push(\"DDoS/DoS\");\n  if (lower.includes(\"data breach\") || lower.includes(\"breach\") || lower.includes(\"exfiltration\")) types.push(\"Data Breach/Exfiltration\");\n\n  return unique(types).join(\", \") || \"Unknown\";\n}\n\nfunction buildSummary(title, source, text, cves) {\n  const body = cleanHtml(text);\n  const firstSentences = body\n    .split(/(?<=[.!?])\\s+/)\n    .filter(Boolean)\n    .slice(0, 2)\n    .join(\" \");\n\n  if (String(source || \"\").toLowerCase().includes(\"nvd\") || cves.length > 0) {\n    const cvePrefix = cves.length ? `${cves.slice(0, 3).join(\", \")} - ` : \"\";\n    return truncate(`${cvePrefix}${title}. ${firstSentences || body}`, 900);\n  }\n\n  return truncate(`${title}. ${firstSentences || body}`, 900);\n}\n\nfunction recommendedActions({severity, attackType, cves, ips, domains, urls, hashes, emails}) {\n  const actions = [];\n\n  if (cves.length) actions.push(\"Prioritize patching and vulnerability validation for the listed CVE ID(s).\");\n  if (ips.length || domains.length || urls.length) actions.push(\"Check firewall, proxy, DNS, and SIEM logs for matches to the extracted network indicators.\");\n  if (hashes.length) actions.push(\"Search EDR/AV telemetry for matching file hashes.\");\n  if (emails.length) actions.push(\"Review mail gateway and user inbox logs for matching email indicators.\");\n  if (/Critical|High/i.test(severity)) actions.push(\"Escalate for analyst review because the severity is high or critical.\");\n  if (/Phishing/i.test(attackType)) actions.push(\"Add related URLs/domains to email security and web filtering blocklists after validation.\");\n  if (/Ransomware|Malware/i.test(attackType)) actions.push(\"Hunt for suspicious process execution, persistence, and lateral movement activity.\");\n\n  if (!actions.length) {\n    actions.push(\"Review the article/CVE details manually and validate any indicators before blocking.\");\n  }\n\n  return actions.join(\"\\n\");\n}\n\nreturn items.map(item => {\n  const fields = item.json.fields || {};\n\n  const title = fields[\"Title\"] || \"\";\n  const source = fields[\"Source\"] || \"\";\n  const url = fields[\"URL\"] || \"\";\n  const rawDescription = fields[\"Raw Description\"] || \"\";\n  const rawContent = fields[\"Raw Content\"] || \"\";\n  const externalId = fields[\"External ID\"] || \"\";\n  const existingTags = fields[\"Tags\"] || \"\";\n  const threatId = fields[\"Threat ID\"] || externalId || \"\";\n\n  const combinedText = [\n    title,\n    source,\n    url,\n    rawDescription,\n    rawContent,\n    externalId,\n    existingTags\n  ].join(\"\\n\");\n\n  const urls = extractUrls(combinedText);\n  const emails = extractEmails(combinedText);\n  const ips = extractIps(combinedText);\n  const hashes = extractHashes(combinedText);\n  const cves = extractCves(combinedText);\n  const domains = extractDomains(combinedText, urls);\n  const affectedSoftware = extractAffectedSoftware(combinedText);\n  const severity = detectSeverity(combinedText);\n  const attackType = detectAttackType(combinedText);\n  const summary = buildSummary(title, source, rawDescription || rawContent, cves);\n\n  const tags = unique([\n    ...String(existingTags || \"\").split(\",\").map(t => t.trim()).filter(Boolean),\n    source && source.toLowerCase().includes(\"krebs\") ? \"security-blog\" : \"\",\n    source && source.toLowerCase().includes(\"nvd\") ? \"cve\" : \"\",\n    attackType !== \"Unknown\" ? attackType.toLowerCase().replace(/[^a-z0-9]+/g, \"-\") : \"\"\n  ]);\n\n  const actions = recommendedActions({severity, attackType, cves, ips, domains, urls, hashes, emails});\n\n  return {\n    json: {\n      airtable_record_id: item.json.id,\n      threat_id: threatId,\n      title,\n      source,\n      url,\n      raw_description: rawDescription,\n      raw_content: rawContent,\n      summary,\n      severity_level: severity,\n      attack_type: attackType,\n      affected_software: affectedSoftware.join(\", \"),\n      cve_ids: cves.join(\", \"),\n      tags: tags.join(\", \"),\n      recommended_actions: actions,\n      processing_status: \"Enriched\",\n      last_processed: new Date().toISOString(),\n      ai_raw_response: \"No Flowise/Groq used. Summary and IOCs generated with deterministic n8n JavaScript extraction rules.\",\n      iocs: {\n        ips,\n        domains,\n        urls,\n        hashes,\n        emails\n      },\n      ioc_count: ips.length + domains.length + urls.length + hashes.length + emails.length + cves.length,\n      \"IOC IPs\": ips.join(\", \"),\n      \"IOC Domains\": domains.join(\", \"),\n      \"IOC URLs\": urls.join(\", \"),\n      \"IOC Hashes\": hashes.join(\", \"),\n      \"IOC Emails\": emails.join(\", \")\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2560,
+        416
+      ],
+      "id": "8c8706e0-9c87-43ba-b046-b871f52b6a1e",
+      "name": "Summarize and Extract IOCs Directly",
+      "notes": "No Flowise/Groq. Uses deterministic JavaScript rules to summarize Krebs/NVD rows and extract IPs, domains, URLs, hashes, emails, and CVEs."
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "value": "appvjtsGiE98O1MhU",
+          "mode": "list",
+          "cachedResultName": "Capstone Project",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblhkkgT7prpJdO4i",
+          "mode": "list",
+          "cachedResultName": "Threats",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU/tblhkkgT7prpJdO4i"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "AI Processed": true,
+            "id": "={{ $json.airtable_record_id }}",
+            "Threat ID": "={{ $json.threat_id }}",
+            "Title": "={{ $json.title }}",
+            "Source": "={{ $json.source }}",
+            "Relevance Score": "={{ $('Get New Krebs/NVD Threat Records').item.json.fields['Relevance Score'] }}",
+            "Confidence": 0,
+            "Published Date": "={{ $('Get New Krebs/NVD Threat Records').item.json.fields['Published Date'] }}",
+            "Collected Date": "={{ $('Get New Krebs/NVD Threat Records').item.json.fields['Collected Date'] }}",
+            "URL": "={{ $json.url }}",
+            "Raw Description": "={{ $json.raw_description }}",
+            "Raw Content": "={{ $json.raw_content }}",
+            "External ID": "={{ $('Get New Krebs/NVD Threat Records').item.json.fields['External ID'] }}",
+            "Processing Status": "={{ $('Get New Krebs/NVD Threat Records').item.json.fields['Processing Status'] }}",
+            "Collector Status": "={{ $('Get New Krebs/NVD Threat Records').item.json.fields['Collector Status'] }}",
+            "Summary": "={{ $json.summary }}",
+            "Severity Level": "={{ $json.severity_level }}",
+            "CVE IDs": "={{ $json.cve_ids }}",
+            "Affected Software": "={{ $json.affected_software }}",
+            "Tags": "={{ $json.tags }}",
+            "Attack Type": "={{ $json.attack_type }}",
+            "IOC IPs": "={{ $json.iocs.ips }}",
+            "IOC Domains": "={{ $json.iocs.domains }}",
+            "IOC URLs": "={{ $json['IOC URLs'] }}",
+            "Recommended Actions": "={{ $json.recommended_actions }}"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": true
+            },
+            {
+              "id": "Threat ID",
+              "displayName": "Threat ID",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Title",
+              "displayName": "Title",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Source",
+              "displayName": "Source",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Source Type",
+              "displayName": "Source Type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "RSS",
+                  "value": "RSS"
+                },
+                {
+                  "name": "CVE_API",
+                  "value": "CVE_API"
+                },
+                {
+                  "name": "Threat_Feed_API",
+                  "value": "Threat_Feed_API"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Category",
+              "displayName": "Category",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "Blog",
+                  "value": "Blog"
+                },
+                {
+                  "name": "CVE",
+                  "value": "CVE"
+                },
+                {
+                  "name": "Threat Feed",
+                  "value": "Threat Feed"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Published Date",
+              "displayName": "Published Date",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Collected Date",
+              "displayName": "Collected Date",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "URL",
+              "displayName": "URL",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Raw Description",
+              "displayName": "Raw Description",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Raw Content",
+              "displayName": "Raw Content",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "External ID",
+              "displayName": "External ID",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Processing Status",
+              "displayName": "Processing Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Collector Status",
+              "displayName": "Collector Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Summary",
+              "displayName": "Summary",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Severity Level",
+              "displayName": "Severity Level",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "CVE IDs",
+              "displayName": "CVE IDs",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Affected Software",
+              "displayName": "Affected Software",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Tags",
+              "displayName": "Tags",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Relevance Score",
+              "displayName": "Relevance Score",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Dedupe Key",
+              "displayName": "Dedupe Key",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Attack Type",
+              "displayName": "Attack Type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "IOC Value",
+              "displayName": "IOC Value",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "IOC Type",
+              "displayName": "IOC Type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "IOC Key",
+              "displayName": "IOC Key",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Threat Record ID",
+              "displayName": "Threat Record ID",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Confidence",
+              "displayName": "Confidence",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Notes",
+              "displayName": "Notes",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "AI Processed",
+              "displayName": "AI Processed",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "boolean",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "IOC IPs",
+              "displayName": "IOC IPs",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "IOC Domains",
+              "displayName": "IOC Domains",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "IOC URLs",
+              "displayName": "IOC URLs",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "IOC Hashes",
+              "displayName": "IOC Hashes",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "IOC Emails",
+              "displayName": "IOC Emails",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Recommended Actions",
+              "displayName": "Recommended Actions",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "typecast": true
+        }
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        -2320,
+        272
+      ],
+      "id": "88bea60f-44d0-4c7c-9af4-b4dec0c73305",
+      "name": "Update Threat Record with Summary and IOCs",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "RCWlut1kLQ8kDtTn",
+          "name": "Airtable Personal Access Token account 56"
+        }
+      },
+      "notes": "Updates the original Threats row with a direct, no-Flowise summary and extracted IOC fields."
+    },
+    {
+      "parameters": {
+        "jsCode": "const out = [];\n\nfunction cleanIocValue(value) {\n  return String(value || \"\").trim();\n}\n\nfunction shouldSkipIoc(value) {\n  const cleanValue = cleanIocValue(value);\n\n  if (!cleanValue) return true;\n\n  const weakValues = [\n    \"suspicious domains\",\n    \"suspicious domain\",\n    \"unknown\",\n    \"n/a\",\n    \"none\",\n    \"not provided\",\n    \"not specified\"\n  ];\n\n  return weakValues.includes(cleanValue.toLowerCase());\n}\n\nfunction addIoc(data, value, type) {\n  const cleanValue = cleanIocValue(value);\n\n  if (shouldSkipIoc(cleanValue)) return;\n\n  const cleanType = String(type || \"Other\").trim();\n  const threatKey = data.airtable_record_id || data.threat_id || \"unknown-threat\";\n  const iocKey = `${threatKey}|${cleanType}|${cleanValue.toLowerCase()}`;\n  const now = new Date().toISOString();\n\n  out.push({\n    json: {\n      \"IOC Key\": iocKey,\n      \"IOC Value\": cleanValue,\n      \"IOC Type\": cleanType,\n      \"Source\": data.source || \"\",\n      \"Threat Record ID\": data.airtable_record_id || \"\",\n      \"Threat ID\": data.threat_id || \"\",\n      \"Threat Title\": data.title || \"\",\n      \"Confidence\": 70,\n      \"First Seen\": now,\n      \"Last Seen\": now,\n      \"Notes\": `Extracted by no-Flowise n8n IOC extractor from ${data.source || \"unknown source\"}`\n    }\n  });\n}\n\nfor (const item of items) {\n  const data = item.json;\n  const iocs = data.iocs || {};\n\n  if (Array.isArray(iocs.ips)) {\n    for (const ip of iocs.ips) addIoc(data, ip, \"IP\");\n  }\n\n  if (Array.isArray(iocs.domains)) {\n    for (const domain of iocs.domains) addIoc(data, domain, \"Domain\");\n  }\n\n  if (Array.isArray(iocs.urls)) {\n    for (const url of iocs.urls) addIoc(data, url, \"URL\");\n  }\n\n  if (Array.isArray(iocs.hashes)) {\n    for (const hash of iocs.hashes) addIoc(data, hash, \"File Hash\");\n  }\n\n  if (Array.isArray(iocs.emails)) {\n    for (const email of iocs.emails) addIoc(data, email, \"Email\");\n  }\n\n  if (data.cve_ids) {\n    const cves = String(data.cve_ids)\n      .split(\",\")\n      .map(cve => cve.trim())\n      .filter(Boolean);\n\n    for (const cve of cves) {\n      addIoc(data, cve, \"CVE\");\n    }\n  }\n}\n\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2320,
+        560
+      ],
+      "id": "063d142a-3ea4-4e73-af74-c42887db5eec",
+      "name": "Build IOC Records from Direct Extraction",
+      "alwaysOutputData": false,
+      "notes": "Outputs one item per extracted IOC. Adds IOC Key for deduplication and Last Seen for update logic."
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appvjtsGiE98O1MhU",
+          "mode": "list",
+          "cachedResultName": "Capstone Project",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblhkkgT7prpJdO4i",
+          "mode": "list",
+          "cachedResultName": "Threats",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU/tblhkkgT7prpJdO4i"
+        },
+        "filterByFormula": "={Dedupe Key} = '{{$json[\"IOC Key\"]}}'",
+        "returnAll": false,
+        "limit": 1,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        -2080,
+        560
+      ],
+      "id": "48a9f38d-82c4-413b-a090-85991147a935",
+      "name": "Search Existing IOC Record",
+      "alwaysOutputData": true,
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "RCWlut1kLQ8kDtTn",
+          "name": "Airtable Personal Access Token account 56"
+        }
+      },
+      "continueOnFail": true,
+      "notes": "Searches for an existing IOC record using Dedupe Key = IOC Key."
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -1840,
+        560
+      ],
+      "id": "29a90a52-c121-4e08-a1ef-22adb2463b3e",
+      "name": "Merge IOC Search Result"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "766372d9-04fb-49d3-8210-93389b2194ea",
+              "leftValue": "={{$json.id}}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -1600,
+        560
+      ],
+      "id": "e00607e9-10b6-47ce-bc83-f433a8eccacb",
+      "name": "IOC Exists?"
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "value": "appvjtsGiE98O1MhU",
+          "mode": "list",
+          "cachedResultName": "Capstone Project",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblhkkgT7prpJdO4i",
+          "mode": "list",
+          "cachedResultName": "Threats",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU/tblhkkgT7prpJdO4i"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "AI Processed": true,
+            "Dedupe Key": "={{$json[\"IOC Key\"]}}",
+            "Threat ID": "={{$json[\"Threat ID\"]}}",
+            "Title": "={{$json[\"Threat Title\"]}}",
+            "Source": "={{$json[\"Source\"]}}",
+            "Processing Status": "IOC Record",
+            "IOC Value": "={{$json[\"IOC Value\"]}}",
+            "IOC Type": "={{$json[\"IOC Type\"]}}",
+            "Threat Record ID": "={{$json[\"Threat Record ID\"]}}",
+            "Confiedence": "={{$json[\"Confidence\"]}}",
+            "Notes": "={{$json[\"Notes\"]}}",
+            "Collected Date": "={{$json[\"Last Seen\"]}}",
+            "Relevance Score": 0
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Threat ID",
+              "displayName": "Threat ID",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Title",
+              "displayName": "Title",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Source",
+              "displayName": "Source",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Source Type",
+              "displayName": "Source Type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "RSS",
+                  "value": "RSS"
+                },
+                {
+                  "name": "CVE_API",
+                  "value": "CVE_API"
+                },
+                {
+                  "name": "Threat_Feed_API",
+                  "value": "Threat_Feed_API"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Category",
+              "displayName": "Category",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "Blog",
+                  "value": "Blog"
+                },
+                {
+                  "name": "CVE",
+                  "value": "CVE"
+                },
+                {
+                  "name": "Threat Feed",
+                  "value": "Threat Feed"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Published Date",
+              "displayName": "Published Date",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Collected Date",
+              "displayName": "Collected Date",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "URL",
+              "displayName": "URL",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Raw Description",
+              "displayName": "Raw Description",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Raw Content",
+              "displayName": "Raw Content",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "External ID",
+              "displayName": "External ID",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Processing Status",
+              "displayName": "Processing Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Collector Status",
+              "displayName": "Collector Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Summary",
+              "displayName": "Summary",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Severity Level",
+              "displayName": "Severity Level",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "CVE IDs",
+              "displayName": "CVE IDs",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Affected Software",
+              "displayName": "Affected Software",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Tags",
+              "displayName": "Tags",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Relevance Score",
+              "displayName": "Relevance Score",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Dedupe Key",
+              "displayName": "Dedupe Key",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Attack Type",
+              "displayName": "Attack Type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "IOC Value",
+              "displayName": "IOC Value",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "IOC Type",
+              "displayName": "IOC Type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Threat Record ID",
+              "displayName": "Threat Record ID",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Confiedence",
+              "displayName": "Confiedence",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Notes",
+              "displayName": "Notes",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "AI Processed",
+              "displayName": "AI Processed",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "boolean",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        -1360,
+        432
+      ],
+      "id": "70970418-32dc-4ac7-b8ae-e1d1c874f9f5",
+      "name": "Create New IOC Record",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "RCWlut1kLQ8kDtTn",
+          "name": "Airtable Personal Access Token account 56"
+        }
+      },
+      "continueOnFail": true,
+      "notes": "Creates an IOC row in the Threats table from direct regex/NVD extraction. If you use a separate IOC table, change this node plus Search/Update IOC nodes."
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "value": "appvjtsGiE98O1MhU",
+          "mode": "list",
+          "cachedResultName": "Capstone Project",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblhkkgT7prpJdO4i",
+          "mode": "list",
+          "cachedResultName": "Threats",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU/tblhkkgT7prpJdO4i"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "id": "={{$json[\"id\"]}}",
+            "AI Processed": true,
+            "Dedupe Key": "={{$json[\"IOC Key\"]}}",
+            "Threat ID": "={{$json[\"Threat ID\"]}}",
+            "Title": "={{$json[\"Threat Title\"]}}",
+            "Source": "={{$json[\"Source\"]}}",
+            "Processing Status": "IOC Record",
+            "IOC Value": "={{$json[\"IOC Value\"]}}",
+            "IOC Type": "={{$json[\"IOC Type\"]}}",
+            "Threat Record ID": "={{$json[\"Threat Record ID\"]}}",
+            "Confiedence": "={{$json[\"Confidence\"]}}",
+            "Notes": "={{$json[\"Notes\"] + \"\\nLast Seen: \" + $json[\"Last Seen\"]}}",
+            "Collected Date": "={{$json[\"Last Seen\"]}}",
+            "Relevance Score": 0
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": true
+            },
+            {
+              "id": "Threat ID",
+              "displayName": "Threat ID",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Title",
+              "displayName": "Title",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Source",
+              "displayName": "Source",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Source Type",
+              "displayName": "Source Type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "RSS",
+                  "value": "RSS"
+                },
+                {
+                  "name": "CVE_API",
+                  "value": "CVE_API"
+                },
+                {
+                  "name": "Threat_Feed_API",
+                  "value": "Threat_Feed_API"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Category",
+              "displayName": "Category",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "Blog",
+                  "value": "Blog"
+                },
+                {
+                  "name": "CVE",
+                  "value": "CVE"
+                },
+                {
+                  "name": "Threat Feed",
+                  "value": "Threat Feed"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Published Date",
+              "displayName": "Published Date",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Collected Date",
+              "displayName": "Collected Date",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "URL",
+              "displayName": "URL",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Raw Description",
+              "displayName": "Raw Description",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Raw Content",
+              "displayName": "Raw Content",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "External ID",
+              "displayName": "External ID",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Processing Status",
+              "displayName": "Processing Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Collector Status",
+              "displayName": "Collector Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Summary",
+              "displayName": "Summary",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Severity Level",
+              "displayName": "Severity Level",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "CVE IDs",
+              "displayName": "CVE IDs",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Affected Software",
+              "displayName": "Affected Software",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Tags",
+              "displayName": "Tags",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Relevance Score",
+              "displayName": "Relevance Score",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Dedupe Key",
+              "displayName": "Dedupe Key",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Attack Type",
+              "displayName": "Attack Type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "IOC Value",
+              "displayName": "IOC Value",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "IOC Type",
+              "displayName": "IOC Type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Threat Record ID",
+              "displayName": "Threat Record ID",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Confiedence",
+              "displayName": "Confiedence",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Notes",
+              "displayName": "Notes",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "AI Processed",
+              "displayName": "AI Processed",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "boolean",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        -1360,
+        672
+      ],
+      "id": "86cc0238-61d9-4c6f-8e4b-b4445b1178ea",
+      "name": "Update Existing IOC Record",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "RCWlut1kLQ8kDtTn",
+          "name": "Airtable Personal Access Token account 56"
+        }
+      },
+      "continueOnFail": true,
+      "notes": "Updates existing IOC row in Threats based on Dedupe Key/IOC Key."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get New Krebs/NVD Threat Records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get New Krebs/NVD Threat Records": {
+      "main": [
+        [
+          {
+            "node": "Summarize and Extract IOCs Directly",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize and Extract IOCs Directly": {
+      "main": [
+        [
+          {
+            "node": "Update Threat Record with Summary and IOCs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build IOC Records from Direct Extraction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build IOC Records from Direct Extraction": {
+      "main": [
+        [
+          {
+            "node": "Search Existing IOC Record",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge IOC Search Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Existing IOC Record": {
+      "main": [
+        [
+          {
+            "node": "Merge IOC Search Result",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge IOC Search Result": {
+      "main": [
+        [
+          {
+            "node": "IOC Exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IOC Exists?": {
+      "main": [
+        [
+          {
+            "node": "Create New IOC Record",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Existing IOC Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "2e12178b-b40f-4eee-9dc3-8e9cf9e9dc52",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "a69ec37954977b88a479ebfa185a30fc778ae1a13872bdbe9e26e7b8edafd875"
+  },
+  "id": "uPCOYOApTTEYNk5f",
+  "tags": []
+}
