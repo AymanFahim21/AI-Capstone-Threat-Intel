@@ -1,0 +1,521 @@
+{
+  "name": "Feed Collector - NVD CVE to Airtable",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        576,
+        -144
+      ],
+      "id": "ccd50a95-258b-4bbb-adf8-7039d02067ce",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "url": "https://services.nvd.nist.gov/rest/json/cves/2.0",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "resultsPerPage",
+              "value": "50"
+            },
+            {
+              "name": "startIndex",
+              "value": "0"
+            },
+            {
+              "name": "lastModStartDate",
+              "value": "={{$now.minus({ days: 1 }).toFormat(\"yyyy-MM-dd'T'HH:mm:ss'.000'\")}}"
+            },
+            {
+              "name": "lastModEndDate",
+              "value": "={{$now.toFormat(\"yyyy-MM-dd'T'HH:mm:ss'.000'\")}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        816,
+        -144
+      ],
+      "id": "6303d2e9-5b3d-446a-aca5-aeb24dec3be9",
+      "name": "HTTP Request - NVD CVE API"
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = items[0].json;\nconst vulnerabilities = (response.vulnerabilities || []).slice(0, 50);\n\nfunction getEnglishDescription(cve) {\n  const desc = cve.descriptions?.find(d => d.lang === \"en\");\n  return desc?.value || \"\";\n}\n\nfunction getCvssInfo(cve) {\n  const metrics = cve.metrics || {};\n\n  const cvss =\n    metrics.cvssMetricV31?.[0] ||\n    metrics.cvssMetricV30?.[0] ||\n    metrics.cvssMetricV2?.[0] ||\n    null;\n\n  if (!cvss) {\n    return {\n      score: 0,\n      severity: \"Unknown\"\n    };\n  }\n\n  return {\n    score: cvss.cvssData?.baseScore || 0,\n    severity: cvss.cvssData?.baseSeverity || cvss.baseSeverity || \"Unknown\"\n  };\n}\n\nfunction collectCpeMatches(node, matches = []) {\n  if (!node) return matches;\n\n  if (Array.isArray(node.cpeMatch)) {\n    matches.push(...node.cpeMatch);\n  }\n\n  if (Array.isArray(node.children)) {\n    for (const child of node.children) {\n      collectCpeMatches(child, matches);\n    }\n  }\n\n  return matches;\n}\n\nfunction getAffectedSoftware(cve) {\n  const products = new Set();\n  const nodes = cve.configurations?.nodes || [];\n\n  for (const node of nodes) {\n    const matches = collectCpeMatches(node);\n\n    for (const match of matches) {\n      const criteria = match.criteria || \"\";\n      const parts = criteria.split(\":\");\n\n      // CPE format usually looks like:\n      // cpe:2.3:a:vendor:product:version:...\n      if (parts.length >= 6) {\n        const vendor = parts[3];\n        const product = parts[4];\n\n        if (vendor && product && vendor !== \"*\" && product !== \"*\") {\n          products.add(`${vendor}:${product}`);\n        }\n      }\n    }\n  }\n\n  return Array.from(products).slice(0, 10).join(\", \");\n}\n\nreturn vulnerabilities.map(vuln => {\n  const cve = vuln.cve;\n  const cveId = cve.id;\n  const description = getEnglishDescription(cve);\n  const cvss = getCvssInfo(cve);\n  const affectedSoftware = getAffectedSoftware(cve);\n\n  const shortDescription =\n    description.length > 140\n      ? description.substring(0, 140) + \"...\"\n      : description;\n\n  return {\n    json: {\n      \"Threat ID\": `NVD-${cveId}`,\n      \"Title\": `${cveId}: ${shortDescription}`,\n      \"Source\": \"NVD CVE\",\n      \"Source Type\": \"CVE_API\",\n      \"Category\": \"CVE\",\n      \"Published Date\": cve.published || null,\n      \"Collected Date\": new Date().toISOString(),\n      \"URL\": `https://nvd.nist.gov/vuln/detail/${cveId}`,\n      \"Raw Description\": description,\n      \"Raw Content\": JSON.stringify(cve),\n      \"External ID\": cveId,\n      \"Dedupe Key\": `NVD-${cveId}`,\n      \"Processing Status\": \"New\",\n      \"Collector Status\": \"Collected\",\n      \"Summary\": \"\",\n      \"Severity Level\": cvss.severity,\n      \"CVE IDs\": cveId,\n      \"Affected Software\": affectedSoftware,\n      \"Tags\": `nvd,cve,${cvss.severity.toLowerCase()}`,\n      \"Relevance Score\": 0\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1056,
+        -144
+      ],
+      "id": "b56631cd-dd74-42b4-8faa-d6aaeb621be7",
+      "name": "Normalize NVD CVEs"
+    },
+    {
+      "parameters": {
+        "jsCode": "const records = items.map(item => item.json);\nconst keys = records\n  .map(record => record[\"Dedupe Key\"])\n  .filter(Boolean)\n  .slice(0, 50);\n\nfunction escapeAirtableString(value) {\n  return String(value).replace(/\\\\/g, \"\\\\\\\\\").replace(/'/g, \"\\\\'\");\n}\n\nlet filterFormula = \"FALSE()\";\n\nif (keys.length === 1) {\n  filterFormula = `{Dedupe Key} = '${escapeAirtableString(keys[0])}'`;\n}\n\nif (keys.length > 1) {\n  const conditions = keys.map(key => `{Dedupe Key} = '${escapeAirtableString(key)}'`);\n  filterFormula = `OR(${conditions.join(\", \")})`;\n}\n\nreturn [\n  {\n    json: {\n      filterFormula,\n      normalizedCount: records.length,\n      dedupeKeys: keys\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1296,
+        -144
+      ],
+      "id": "31d360a3-7c71-48ed-8425-5b26ec80c97d",
+      "name": "Build Airtable Search Formula"
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appvjtsGiE98O1MhU",
+          "mode": "list",
+          "cachedResultName": "Capstone Project",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblhkkgT7prpJdO4i",
+          "mode": "list",
+          "cachedResultName": "Threats",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU/tblhkkgT7prpJdO4i"
+        },
+        "filterByFormula": "={{$json[\"filterFormula\"]}}",
+        "returnAll": false,
+        "limit": 50,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        1536,
+        -144
+      ],
+      "id": "c1cabe72-89ff-4234-9eeb-b24b8db9c88a",
+      "name": "Search Existing CVEs",
+      "alwaysOutputData": true,
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "RCWlut1kLQ8kDtTn",
+          "name": "Airtable Personal Access Token account 56"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// This node compares the 50 normalized CVEs against existing Airtable records.\n// It only outputs records that do NOT already exist in Airtable.\n\nlet normalizedItems = [];\n\ntry {\n  normalizedItems = $(\"Normalize NVD CVEs\").all().map(item => item.json);\n} catch (error) {\n  normalizedItems = $items(\"Normalize NVD CVEs\").map(item => item.json);\n}\n\nconst existingKeys = new Set();\n\nfor (const item of items) {\n  const fields = item.json.fields || {};\n  const key = fields[\"Dedupe Key\"] || item.json[\"Dedupe Key\"];\n\n  if (key) {\n    existingKeys.add(String(key));\n  }\n}\n\nconst newRecords = normalizedItems.filter(record => {\n  const key = String(record[\"Dedupe Key\"] || \"\");\n  return key && !existingKeys.has(key);\n});\n\nreturn newRecords.map(record => ({ json: record }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1776,
+        -144
+      ],
+      "id": "936efcc5-ba28-4071-8829-9f6e3e858bdd",
+      "name": "Filter New CVEs"
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "value": "appvjtsGiE98O1MhU",
+          "mode": "list",
+          "cachedResultName": "Capstone Project",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblhkkgT7prpJdO4i",
+          "mode": "list",
+          "cachedResultName": "Threats",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU/tblhkkgT7prpJdO4i"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Threat ID": "={{$json[\"Threat ID\"]}}",
+            "Title": "={{$json[\"Title\"]}}",
+            "Source": "={{$json[\"Source\"]}}",
+            "Source Type": "={{$json[\"Source Type\"]}}",
+            "Category": "={{$json[\"Category\"]}}",
+            "Published Date": "={{$json[\"Published Date\"]}}",
+            "Collected Date": "={{$json[\"Collected Date\"]}}",
+            "URL": "={{$json[\"URL\"]}}",
+            "Raw Description": "={{$json[\"Raw Description\"]}}",
+            "Raw Content": "={{$json[\"Raw Content\"]}}",
+            "External ID": "={{$json[\"External ID\"]}}",
+            "Processing Status": "={{$json[\"Processing Status\"]}}",
+            "Collector Status": "={{$json[\"Collector Status\"]}}",
+            "Summary": "={{$json[\"Summary\"]}}",
+            "Severity Level": "={{$json[\"Severity Level\"]}}",
+            "CVE IDs": "={{$json[\"CVE IDs\"]}}",
+            "Affected Software": "={{$json[\"Affected Software\"]}}",
+            "Tags": "={{$json[\"Tags\"]}}",
+            "Relevance Score": "={{$json[\"Relevance Score\"]}}",
+            "Dedupe Key": "={{$json[\"Dedupe Key\"]}}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Threat ID",
+              "displayName": "Threat ID",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Title",
+              "displayName": "Title",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Source",
+              "displayName": "Source",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Source Type",
+              "displayName": "Source Type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "RSS",
+                  "value": "RSS"
+                },
+                {
+                  "name": "CVE_API",
+                  "value": "CVE_API"
+                },
+                {
+                  "name": "Threat_Feed_API",
+                  "value": "Threat_Feed_API"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Category",
+              "displayName": "Category",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "Blog",
+                  "value": "Blog"
+                },
+                {
+                  "name": "CVE",
+                  "value": "CVE"
+                },
+                {
+                  "name": "Threat Feed",
+                  "value": "Threat Feed"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Published Date",
+              "displayName": "Published Date",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Collected Date",
+              "displayName": "Collected Date",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "URL",
+              "displayName": "URL",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Raw Description",
+              "displayName": "Raw Description",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Raw Content",
+              "displayName": "Raw Content",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "External ID",
+              "displayName": "External ID",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Processing Status",
+              "displayName": "Processing Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Collector Status",
+              "displayName": "Collector Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Summary",
+              "displayName": "Summary",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Severity Level",
+              "displayName": "Severity Level",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "CVE IDs",
+              "displayName": "CVE IDs",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Affected Software",
+              "displayName": "Affected Software",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Tags",
+              "displayName": "Tags",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Relevance Score",
+              "displayName": "Relevance Score",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Dedupe Key",
+              "displayName": "Dedupe Key",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        2016,
+        -144
+      ],
+      "id": "a3650a08-aa44-46b3-8a15-2b02c0fb5104",
+      "name": "Create New CVE Record",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "RCWlut1kLQ8kDtTn",
+          "name": "Airtable Personal Access Token account 56"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request - NVD CVE API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request - NVD CVE API": {
+      "main": [
+        [
+          {
+            "node": "Normalize NVD CVEs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize NVD CVEs": {
+      "main": [
+        [
+          {
+            "node": "Build Airtable Search Formula",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Airtable Search Formula": {
+      "main": [
+        [
+          {
+            "node": "Search Existing CVEs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Existing CVEs": {
+      "main": [
+        [
+          {
+            "node": "Filter New CVEs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter New CVEs": {
+      "main": [
+        [
+          {
+            "node": "Create New CVE Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "7ca7b15f-e6c2-4261-a80d-edd111a809ae",
+  "meta": {
+    "instanceId": "a69ec37954977b88a479ebfa185a30fc778ae1a13872bdbe9e26e7b8edafd875"
+  },
+  "id": "sRzhOWHu2lOyfgWz",
+  "tags": []
+}

@@ -1,0 +1,460 @@
+{
+  "name": "Feed Collector AlienVault OTX Workflow",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        -288
+      ],
+      "id": "9300ad21-bf3f-4a48-b75f-8b155fa820e0",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "jsCode": "const records = items.map(item => item.json);\n\nconst keys = records\n  .map(record => record.pulse_id)\n  .filter(Boolean)\n  .slice(0, 50);\n\nfunction escapeAirtableString(value) {\n  return String(value)\n    .replace(/\\\\/g, \"\\\\\\\\\")\n    .replace(/'/g, \"\\\\'\");\n}\n\nlet filterFormula = \"FALSE()\";\n\nif (keys.length === 1) {\n  filterFormula = `{pulse_id} = '${escapeAirtableString(keys[0])}'`;\n}\n\nif (keys.length > 1) {\n  const conditions = keys.map(key => {\n    return `{pulse_id} = '${escapeAirtableString(key)}'`;\n  });\n\n  filterFormula = `OR(${conditions.join(\",\")})`;\n}\n\nreturn [\n  {\n    json: {\n      filterFormula,\n      totalInputRecords: records.length,\n      pulseIds: keys\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        -288
+      ],
+      "id": "2c1303b4-d10f-46cc-959e-05e5e048ff87",
+      "name": "Build Airtable Search Formula"
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appvjtsGiE98O1MhU",
+          "mode": "list",
+          "cachedResultName": "Capstone Project",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tbl1bXDTzv8jiVnQ1",
+          "mode": "list",
+          "cachedResultName": "AlienVault_OTX",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU/tbl1bXDTzv8jiVnQ1"
+        },
+        "filterByFormula": "={{$json[\"filterFormula\"]}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        2160,
+        -288
+      ],
+      "id": "bd2ad8ca-5219-4a9b-adfb-d935cbd26ae9",
+      "name": "Search Existing AlienVault Pulses",
+      "alwaysOutputData": true,
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "RCWlut1kLQ8kDtTn",
+          "name": "Airtable Personal Access Token account 56"
+        }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const normalizedRecords = $items(\"Normalize AlienVault Data1\").map(item => item.json);\n\nconst existingPulseIds = new Set();\n\nfor (const item of items) {\n  const fields = item.json?.fields || {};\n  const pulseId = fields.pulse_id;\n\n  if (pulseId) {\n    existingPulseIds.add(String(pulseId));\n  }\n}\n\nconst newRecords = normalizedRecords.filter(record => {\n  return record.pulse_id && !existingPulseIds.has(String(record.pulse_id));\n});\n\nreturn newRecords.map(record => {\n  return { json: record };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2400,
+        -288
+      ],
+      "id": "6048113d-fc20-4afe-974a-8efbda76ea76",
+      "name": "Filter New AlienVault Records"
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "value": "appvjtsGiE98O1MhU",
+          "mode": "list",
+          "cachedResultName": "Capstone Project",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tbl1bXDTzv8jiVnQ1",
+          "mode": "list",
+          "cachedResultName": "AlienVault_OTX",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU/tbl1bXDTzv8jiVnQ1"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "source": "={{$json[\"source\"]}}",
+            "pulse_id": "={{$json[\"pulse_id\"]}}",
+            "title": "={{$json[\"title\"]}}",
+            "description": "={{$json[\"description\"]}}",
+            "author": "={{$json[\"author\"]}}",
+            "created": "={{$json[\"created\"]}}",
+            "modified": "={{$json[\"modified\"]}}",
+            "tags": "={{$json[\"tags\"]}}",
+            "malware_families": "={{$json[\"malware_families\"]}}",
+            "industries": "={{$json[\"industries\"]}}",
+            "adversary": "={{$json[\"adversary\"]}}",
+            "references": "={{$json[\"references\"]}}",
+            "public": "={{$json[\"public\"]}}",
+            "TLP": "={{$json[\"TLP\"]}}",
+            "indicator_count": "={{$json[\"indicator_count\"]}}",
+            "export_time": "={{$json[\"export_time\"]}}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "source",
+              "displayName": "source",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "pulse_id",
+              "displayName": "pulse_id",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "title",
+              "displayName": "title",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "description",
+              "displayName": "description",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "author",
+              "displayName": "author",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "created",
+              "displayName": "created",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "modified",
+              "displayName": "modified",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "tags",
+              "displayName": "tags",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "malware_families",
+              "displayName": "malware_families",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "industries",
+              "displayName": "industries",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "adversary",
+              "displayName": "adversary",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "references",
+              "displayName": "references",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "public",
+              "displayName": "public",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "boolean",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "TLP",
+              "displayName": "TLP",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "indicator_count",
+              "displayName": "indicator_count",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "export_time",
+              "displayName": "export_time",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "typecast": true
+        }
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        2640,
+        -288
+      ],
+      "id": "863c7544-f92b-4c5c-a9f1-253e66547470",
+      "name": "Create New AlienVault Record",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "RCWlut1kLQ8kDtTn",
+          "name": "Airtable Personal Access Token account 56"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://otx.alienvault.com/api/v1/pulses/subscribed",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "50"
+            },
+            {
+              "name": "page",
+              "value": "1"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-OTX-API-KEY",
+              "value": "7889dfc42079dbbcb3c8e8f0f0cec83c0b9e1d8511de5090133447bf0948a0be"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1440,
+        -288
+      ],
+      "id": "d2e95a15-6704-4019-bb44-90b58d9d5d6c",
+      "name": "Get AlienVault OTX Pulses1",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = items[0].json || {};\n\nlet pulses = [];\n\nif (Array.isArray(response.results)) {\n  pulses = response.results;\n} else if (Array.isArray(response.pulses)) {\n  pulses = response.pulses;\n} else if (Array.isArray(response.data)) {\n  pulses = response.data;\n} else if (Array.isArray(response)) {\n  pulses = response;\n}\n\npulses = pulses.slice(0, 50);\n\nfunction cleanText(value) {\n  return value ? String(value).replace(/<[^>]*>/g, \"\").trim() : \"\";\n}\n\nfunction arrayToText(value) {\n  if (Array.isArray(value)) {\n    return value.filter(Boolean).join(\", \");\n  }\n  return value ? String(value) : \"\";\n}\n\nreturn pulses.map(pulse => {\n  const pulseId = pulse.id || pulse.pulse_id || pulse.name || pulse.created || \"\";\n  const indicators = Array.isArray(pulse.indicators) ? pulse.indicators : [];\n\n  return {\n    json: {\n      source: \"AlienVault OTX\",\n      pulse_id: String(pulseId),\n      title: pulse.name || pulse.title || \"Untitled OTX Pulse\",\n      description: cleanText(pulse.description || pulse.content || \"\"),\n      author: pulse.author_name || pulse.author || \"Unknown\",\n      created: pulse.created || null,\n      modified: pulse.modified || null,\n      tags: arrayToText(pulse.tags),\n      malware_families: arrayToText(pulse.malware_families),\n      industries: arrayToText(pulse.targeted_industries),\n      adversary: pulse.adversary || \"\",\n      references: Array.isArray(pulse.references) ? pulse.references.join(\"\\n\") : \"\",\n      public: Boolean(pulse.public),\n      TLP: pulse.TLP || pulse.tlp || \"\",\n      indicator_count: pulse.indicator_count || indicators.length || 0,\n      export_time: new Date().toISOString()\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        -288
+      ],
+      "id": "1588e033-6308-486a-9769-ae19b5a68982",
+      "name": "Normalize AlienVault Data1"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Get AlienVault OTX Pulses1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Airtable Search Formula": {
+      "main": [
+        [
+          {
+            "node": "Search Existing AlienVault Pulses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Existing AlienVault Pulses": {
+      "main": [
+        [
+          {
+            "node": "Filter New AlienVault Records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter New AlienVault Records": {
+      "main": [
+        [
+          {
+            "node": "Create New AlienVault Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get AlienVault OTX Pulses1": {
+      "main": [
+        [
+          {
+            "node": "Normalize AlienVault Data1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize AlienVault Data1": {
+      "main": [
+        [
+          {
+            "node": "Build Airtable Search Formula",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "adfdcf16-3436-469f-a5ca-7d4693df8bb6",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "a69ec37954977b88a479ebfa185a30fc778ae1a13872bdbe9e26e7b8edafd875"
+  },
+  "id": "iVNOhMH1wMjWdjDl",
+  "tags": []
+}

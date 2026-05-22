@@ -1,0 +1,533 @@
+{
+  "name": "Feed Collector - Krebs RSS to Airtable",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -416,
+        464
+      ],
+      "id": "8bdb61f1-e3f0-4805-8476-e5a6a8ece6db",
+      "name": "Schedule Trigger (Every 6h)"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -416,
+        608
+      ],
+      "id": "95914795-a480-4c14-af6a-efe156d8341e",
+      "name": "When clicking 'Execute workflow'"
+    },
+    {
+      "parameters": {
+        "url": "https://krebsonsecurity.com/feed/",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.2,
+      "position": [
+        32,
+        464
+      ],
+      "id": "51f862c0-deb7-49c1-a11e-29ff8d05237f",
+      "name": "RSS Read - Krebs on Security"
+    },
+    {
+      "parameters": {
+        "jsCode": "// FIX #1: Replaced broken additive hash with a proper DJB2-XOR hash.\n// The old hash summed char codes, causing collisions (e.g. 'ab' == 'ba').\n// This caused new articles to be wrongly treated as duplicates.\nfunction robustHash(str) {\n  let hash = 5381;\n  for (let i = 0; i < str.length; i++) {\n    hash = ((hash << 5) + hash) ^ str.charCodeAt(i);\n    hash = hash & 0x7fffffff; // keep positive 31-bit integer\n  }\n  return hash.toString();\n}\n\nconst sourceName = 'Krebs on Security';\nconst maxItems = 50;\n\nreturn items.slice(0, maxItems).map(item => {\n  const data = item.json;\n  const url = data.link || '';\n  const title = data.title || 'Untitled RSS Item';\n  const dedupeKey = robustHash(sourceName + url);\n  const rawDescription = data.contentSnippet || data.description || data['content:encodedSnippet'] || '';\n  const rawContent = data['content:encoded'] || data.content || data.description || rawDescription || '';\n\n  return {\n    json: {\n      \"Threat ID\": dedupeKey,\n      \"Title\": title,\n      \"Source\": sourceName,\n      \"Source Type\": \"RSS\",\n      \"Category\": \"Blog\",\n      \"Published Date\": data.pubDate || data.isoDate || null,\n      \"Collected Date\": new Date().toISOString(),\n      \"URL\": url,\n      \"Raw Description\": rawDescription,\n      \"Raw Content\": rawContent,\n      \"External ID\": data.guid || url,\n      \"Dedupe Key\": dedupeKey,\n      \"Processing Status\": \"New\",\n      \"Collector Status\": \"Collected\",\n      \"Summary\": \"\",\n      \"Severity Level\": \"Unknown\",\n      \"CVE IDs\": \"\",\n      \"Affected Software\": \"\",\n      \"Tags\": \"security-blog,krebsonsecurity,rss\",\n      \"Relevance Score\": 0\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        256,
+        464
+      ],
+      "id": "fee14c8d-53ad-4c43-b1bd-7479d1544f96",
+      "name": "Normalize Krebs RSS Items"
+    },
+    {
+      "parameters": {
+        "jsCode": "const records = items.map(item => item.json);\nconst keys = records\n  .map(record => record[\"Dedupe Key\"])\n  .filter(Boolean)\n  .slice(0, 50);\n\nfunction escapeAirtableString(value) {\n  return String(value)\n    .replace(/\\\\/g, \"\\\\\\\\\")\n    .replace(/'/g, \"\\\\'\");\n}\n\nlet filterFormula = \"FALSE()\";\n\nif (keys.length === 1) {\n  filterFormula = `{Dedupe Key} = '${escapeAirtableString(keys[0])}'`;\n}\n\nif (keys.length > 1) {\n  const conditions = keys.map(key => `{Dedupe Key} = '${escapeAirtableString(key)}'`);\n  filterFormula = `OR(${conditions.join(\", \")})`;\n}\n\nreturn [\n  {\n    json: {\n      filterFormula,\n      normalizedCount: records.length,\n      dedupeKeys: keys\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        464
+      ],
+      "id": "d6b62d38-bb31-4efb-917f-b6e32faf42a1",
+      "name": "Build Airtable Search Formula"
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appvjtsGiE98O1MhU",
+          "mode": "list",
+          "cachedResultName": "Capstone Project",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblhkkgT7prpJdO4i",
+          "mode": "list",
+          "cachedResultName": "Threats",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU/tblhkkgT7prpJdO4i"
+        },
+        "filterByFormula": "={{$json[\"filterFormula\"]}}",
+        "returnAll": false,
+        "limit": 50,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        704,
+        464
+      ],
+      "id": "14601b68-8537-4031-a784-76e24654a801",
+      "name": "Search Existing Krebs Records",
+      "alwaysOutputData": true,
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "RCWlut1kLQ8kDtTn",
+          "name": "Airtable Personal Access Token account 56"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Compares normalized Krebs RSS items against existing Airtable records.\n// Outputs only records that do NOT already exist in Airtable.\n\n// FIX #2: Replaced deprecated $items() fallback with items.map().\n// $items() is the n8n v1 API and throws in v1 execution mode,\n// causing the filter to silently fail when Airtable returns no results.\nlet normalizedItems = [];\ntry {\n  normalizedItems = $(\"Normalize Krebs RSS Items\").all().map(item => item.json);\n} catch (error) {\n  // Safe fallback using current execution context\n  normalizedItems = items.map(item => item.json);\n}\n\nconst existingKeys = new Set();\n\nfor (const item of items) {\n  const fields = item.json.fields || {};\n  const key = fields[\"Dedupe Key\"] || item.json[\"Dedupe Key\"];\n  if (key) {\n    existingKeys.add(String(key));\n  }\n}\n\nconst newRecords = normalizedItems.filter(record => {\n  const key = String(record[\"Dedupe Key\"] || \"\");\n  return key && !existingKeys.has(key);\n});\n\nreturn newRecords.map(record => ({ json: record }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        464
+      ],
+      "id": "5537f4c3-ead3-406b-acc8-c738877c562b",
+      "name": "Filter New Krebs Records",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "value": "appvjtsGiE98O1MhU",
+          "mode": "list",
+          "cachedResultName": "Capstone Project",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblhkkgT7prpJdO4i",
+          "mode": "list",
+          "cachedResultName": "Threats",
+          "cachedResultUrl": "https://airtable.com/appvjtsGiE98O1MhU/tblhkkgT7prpJdO4i"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Threat ID": "={{$json[\"Threat ID\"]}}",
+            "Title": "={{$json[\"Title\"]}}",
+            "Source": "={{$json[\"Source\"]}}",
+            "Source Type": "={{$json[\"Source Type\"]}}",
+            "Category": "={{$json[\"Category\"]}}",
+            "Published Date": "={{$json[\"Published Date\"]}}",
+            "Collected Date": "={{$json[\"Collected Date\"]}}",
+            "URL": "={{$json[\"URL\"]}}",
+            "Raw Description": "={{$json[\"Raw Description\"]}}",
+            "Raw Content": "={{$json[\"Raw Content\"]}}",
+            "External ID": "={{$json[\"External ID\"]}}",
+            "Processing Status": "={{$json[\"Processing Status\"]}}",
+            "Collector Status": "={{$json[\"Collector Status\"]}}",
+            "Summary": "={{$json[\"Summary\"]}}",
+            "Severity Level": "={{$json[\"Severity Level\"]}}",
+            "CVE IDs": "={{$json[\"CVE IDs\"]}}",
+            "Affected Software": "={{$json[\"Affected Software\"]}}",
+            "Tags": "={{$json[\"Tags\"]}}",
+            "Relevance Score": "={{$json[\"Relevance Score\"]}}",
+            "Dedupe Key": "={{$json[\"Dedupe Key\"]}}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Threat ID",
+              "displayName": "Threat ID",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Title",
+              "displayName": "Title",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Source",
+              "displayName": "Source",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Source Type",
+              "displayName": "Source Type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "RSS",
+                  "value": "RSS"
+                },
+                {
+                  "name": "CVE_API",
+                  "value": "CVE_API"
+                },
+                {
+                  "name": "Threat_Feed_API",
+                  "value": "Threat_Feed_API"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Category",
+              "displayName": "Category",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "Blog",
+                  "value": "Blog"
+                },
+                {
+                  "name": "CVE",
+                  "value": "CVE"
+                },
+                {
+                  "name": "Threat Feed",
+                  "value": "Threat Feed"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Published Date",
+              "displayName": "Published Date",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Collected Date",
+              "displayName": "Collected Date",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "URL",
+              "displayName": "URL",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Raw Description",
+              "displayName": "Raw Description",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Raw Content",
+              "displayName": "Raw Content",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "External ID",
+              "displayName": "External ID",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Processing Status",
+              "displayName": "Processing Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Collector Status",
+              "displayName": "Collector Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Summary",
+              "displayName": "Summary",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Severity Level",
+              "displayName": "Severity Level",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "CVE IDs",
+              "displayName": "CVE IDs",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Affected Software",
+              "displayName": "Affected Software",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Tags",
+              "displayName": "Tags",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Relevance Score",
+              "displayName": "Relevance Score",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Dedupe Key",
+              "displayName": "Dedupe Key",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        1136,
+        464
+      ],
+      "id": "e5bbcf69-a68e-4dec-809f-c896c2e814fa",
+      "name": "Create New Krebs Record",
+      "alwaysOutputData": true,
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "RCWlut1kLQ8kDtTn",
+          "name": "Airtable Personal Access Token account 56"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger (Every 6h)": {
+      "main": [
+        [
+          {
+            "node": "RSS Read - Krebs on Security",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When clicking 'Execute workflow'": {
+      "main": [
+        [
+          {
+            "node": "RSS Read - Krebs on Security",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RSS Read - Krebs on Security": {
+      "main": [
+        [
+          {
+            "node": "Normalize Krebs RSS Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Krebs RSS Items": {
+      "main": [
+        [
+          {
+            "node": "Build Airtable Search Formula",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Airtable Search Formula": {
+      "main": [
+        [
+          {
+            "node": "Search Existing Krebs Records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Existing Krebs Records": {
+      "main": [
+        [
+          {
+            "node": "Filter New Krebs Records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter New Krebs Records": {
+      "main": [
+        [
+          {
+            "node": "Create New Krebs Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "4dfc0575-03a4-4e7e-bd78-083fd92364bf",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "a69ec37954977b88a479ebfa185a30fc778ae1a13872bdbe9e26e7b8edafd875"
+  },
+  "id": "nWtd6rZODgWttueu",
+  "tags": []
+}
